@@ -175,6 +175,18 @@
   <div class="kente" id="kenteBar"></div>
 </header>
 
+<div style="max-width:1240px; margin:16px auto 0; padding:0 24px;">
+  <section class="panel" style="border-top-color:var(--yellow-deep);">
+    <h2 style="color:var(--yellow-deep)">Continue where you left off</h2>
+    <p class="hint" style="margin:0 0 10px">Projects save right on this device (this browser) — photos, videos, text and settings, so you don't have to redo any of it.</p>
+    <div class="preset-row">
+      <select id="projectSel"><option value="">— no saved projects yet —</option></select>
+      <button id="loadProject" title="Load this project">Load</button>
+      <button id="deleteProject" title="Delete this project">Delete</button>
+    </div>
+  </section>
+</div>
+
 <main>
   <div class="controls">
 
@@ -248,6 +260,18 @@
       <h2>4 · Music &amp; Timing</h2>
       <label for="musicInput">Soundtrack (clips are always muted, only this plays)</label>
       <input type="file" id="musicInput" accept="audio/*" style="color:var(--muted); font-size:13px;">
+      <label for="presetMusicSel">Or pick a preloaded soca track</label>
+      <select id="presetMusicSel">
+        <option value="">— none, upload your own above —</option>
+        <option value="music/machel-montano-encore.mp3">Machel Montano — Encore</option>
+        <option value="music/voice-cyah-behave.mp3">Voice — Cyah Behave</option>
+        <option value="music/bunji-garlin-hard-fete.mp3">Bunji Garlin — Hard Fete</option>
+        <option value="music/lyrikal-look-back.mp3">Lyrikal — Look Back (Benna Riddim)</option>
+        <option value="music/nadia-batson-market.mp3">Nadia Batson — Market</option>
+        <option value="music/patrice-roberts-mind-my-business.mp3">Patrice Roberts — Mind My Business (Happy Papi Riddim)</option>
+        <option value="music/shal-marshall-splinters.mp3">Shal Marshall — Splinters</option>
+        <option value="music/2026-kiddies-mix.mp3">2026 Kiddies Mix</option>
+      </select>
       <p class="music-status" id="musicStatus"></p>
       <label for="musicStartRange">Music starts at: <b id="musicStartLabel">0s</b></label>
       <input type="range" id="musicStartRange" min="0" max="0" step="1" value="0" disabled>
@@ -359,6 +383,9 @@
       </div>
     </section>
 
+    <div class="btnrow">
+      <button class="btn btn-ghost" id="saveProjectBtn">💾 Save project for later</button>
+    </div>
     <div class="btnrow">
       <button class="btn btn-ghost" id="previewBtn">Preview</button>
       <button class="btn btn-main" id="exportBtn">Export video</button>
@@ -648,8 +675,8 @@ function activeBeats(){
 }
 musicStartRange.addEventListener("input", ()=>{ musicStartLabel.textContent = Math.round(+musicStartRange.value)+"s"; repaintIdle(); });
 
-document.getElementById("musicInput").addEventListener("change", async e=>{
-  const f = e.target.files[0]; if(!f) return;
+let currentPresetMusicPath = null;
+async function loadMusicFromFile(f){
   if(musicEl){ musicEl.pause(); }
   musicEl = new Audio(URL.createObjectURL(f)); musicEl.preload = "auto";
   musicSrcNode = null; beats = [];
@@ -668,6 +695,27 @@ document.getElementById("musicInput").addEventListener("change", async e=>{
       : "♪ Loaded. Couldn't find a clear beat, slides will space evenly.";
   }catch(err){
     musicStatus.textContent = "♪ Loaded (beat scan not supported here, slides will space evenly).";
+  }
+}
+
+document.getElementById("musicInput").addEventListener("change", e=>{
+  const f = e.target.files[0]; if(!f) return;
+  currentPresetMusicPath = null;
+  presetMusicSel.value = "";
+  loadMusicFromFile(f);
+});
+
+const presetMusicSel = document.getElementById("presetMusicSel");
+presetMusicSel.addEventListener("change", async ()=>{
+  const path = presetMusicSel.value;
+  if(!path) return;
+  musicStatus.textContent = "Loading track…";
+  try{
+    const blob = await (await fetch(path)).blob();
+    currentPresetMusicPath = path;
+    await loadMusicFromFile(blob);
+  }catch(e){
+    musicStatus.textContent = "Couldn't load that track.";
   }
 });
 function detectBeats(buf){
@@ -1529,10 +1577,189 @@ exportBtn.addEventListener("click", async ()=>{
   runTimeline(()=>rec.stop());
 });
 
+/* ---------------- save & resume projects (stored locally on this device) ---------------- */
+function openProjectsDB(){
+  return new Promise((resolve,reject)=>{
+    const req = indexedDB.open("masMotionProjects", 1);
+    req.onupgradeneeded = ()=>{ req.result.createObjectStore("projects", {keyPath:"name"}); };
+    req.onsuccess = ()=>resolve(req.result);
+    req.onerror = ()=>reject(req.error);
+  });
+}
+async function blobFromUrl(url){ return (await fetch(url)).blob(); }
+async function blobsFromSet(set){
+  return Promise.all(set.arr.map(async m=>({blob: await blobFromUrl(m.url)})));
+}
+async function loadImageBlobInto(set, blob){
+  return new Promise(resolve=>{
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = ()=>{ set.arr.push({el:img, url}); resolve(); };
+    img.src = url;
+  });
+}
+
+async function saveProject(name){
+  const project = {
+    name, savedAt: Date.now(),
+    media: await Promise.all(media.map(async m=>({
+      kind:m.kind, blob: await blobFromUrl(m.url), trim:m.trim, dur:m.dur
+    }))),
+    filmstrip: await blobsFromSet(filmstripSet),
+    shuffle: await blobsFromSet(shuffleSet),
+    brady: await blobsFromSet(bradySet),
+    lines: getLines(),
+    settings: {
+      cText:cText.value, cAccent:cAccent.value, cBg:cBg.value, fontSel:fontSel.value,
+      motionSel:motionSel.value, stripeOn:document.getElementById("stripeOn").checked,
+      stripe:currentStripe.slice(),
+      beatSync:beatSyncBox.checked, duration:+durRange.value, aspect:aspectSel.value,
+      watermarkOn:watermarkOn.checked, wmOpacity:+wmOpacity.value,
+      sectionName:sectionName.value, sectionWatermarkOn:sectionWatermarkOn.checked,
+      yearOn:yearOn.checked, yearSel:yearSel.value, endLogoOn:endLogoOn.checked,
+      filmstripSegOn:filmstripSegOn.checked, shuffleSegOn:shuffleSegOn.checked, bradySegOn:bradySegOn.checked,
+      musicStart:musicStartSec()
+    },
+    logoBlob: logoImg ? await blobFromUrl(logoPreview.src) : null,
+    musicBlob: (musicEl && !currentPresetMusicPath) ? await blobFromUrl(musicEl.src) : null,
+    presetMusicPath: currentPresetMusicPath
+  };
+  const db = await openProjectsDB();
+  await new Promise((res,rej)=>{
+    const tx = db.transaction("projects","readwrite");
+    tx.objectStore("projects").put(project);
+    tx.oncomplete = res; tx.onerror = ()=>rej(tx.error);
+  });
+}
+
+async function loadProject(name){
+  const db = await openProjectsDB();
+  const project = await new Promise((res,rej)=>{
+    const tx = db.transaction("projects","readonly");
+    const req = tx.objectStore("projects").get(name);
+    req.onsuccess = ()=>res(req.result); req.onerror = ()=>rej(req.error);
+  });
+  if(!project) throw new Error("not found");
+
+  closeTrim();
+  media.length = 0;
+  filmstripSet.arr.length = 0; shuffleSet.arr.length = 0; bradySet.arr.length = 0;
+  for(const m of project.media){
+    const url = URL.createObjectURL(m.blob);
+    if(m.kind==="img"){
+      await new Promise(res=>{ const el=new Image(); el.onload=()=>{ media.push({kind:"img", el, url}); res(); }; el.src=url; });
+    } else {
+      await new Promise(res=>{
+        const el=document.createElement("video");
+        el.muted=true; el.playsInline=true; el.preload="metadata";
+        el.onloadedmetadata=()=>{ media.push({kind:"vid", el, url, dur:m.dur, trim:m.trim}); res(); };
+        el.src=url;
+      });
+    }
+  }
+  for(const p of project.filmstrip) await loadImageBlobInto(filmstripSet, p.blob);
+  for(const p of project.shuffle) await loadImageBlobInto(shuffleSet, p.blob);
+  for(const p of project.brady) await loadImageBlobInto(bradySet, p.blob);
+
+  textLines.innerHTML = "";
+  (project.lines.length ? project.lines : ["",""]).forEach(l=>addTextLine(l));
+
+  const s = project.settings;
+  cText.value = s.cText; cAccent.value = s.cAccent; cBg.value = s.cBg;
+  fontSel.value = s.fontSel; motionSel.value = s.motionSel;
+  document.getElementById("stripeOn").checked = s.stripeOn;
+  currentStripe = s.stripe.slice();
+  beatSyncBox.checked = s.beatSync;
+  durRange.value = s.duration; durLabel.textContent = s.duration+"s";
+  aspectSel.value = s.aspect; setAspect();
+  watermarkOn.checked = s.watermarkOn; watermarkOpts.style.display = s.watermarkOn ? "block" : "none";
+  wmOpacity.value = s.wmOpacity;
+  sectionName.value = s.sectionName; sectionWatermarkOn.checked = s.sectionWatermarkOn;
+  yearOn.checked = s.yearOn; yearOpts.style.display = s.yearOn ? "block" : "none"; yearSel.value = s.yearSel;
+  endLogoOn.checked = s.endLogoOn; endLogoHint.style.display = s.endLogoOn ? "block" : "none";
+  filmstripSegOn.checked = s.filmstripSegOn; shuffleSegOn.checked = s.shuffleSegOn; bradySegOn.checked = s.bradySegOn;
+
+  if(project.logoBlob){
+    const url = URL.createObjectURL(project.logoBlob);
+    await new Promise(res=>{
+      const img = new Image();
+      img.onload = ()=>{ logoImg=img; logoPreview.src=url; logoPreviewWrap.style.display="flex"; res(); };
+      img.src = url;
+    });
+  } else {
+    logoImg = null; logoPreviewWrap.style.display = "none";
+  }
+
+  if(project.presetMusicPath){
+    presetMusicSel.value = project.presetMusicPath;
+    currentPresetMusicPath = project.presetMusicPath;
+    await loadMusicFromFile(await blobFromUrl(project.presetMusicPath));
+    musicStartRange.value = s.musicStart; musicStartLabel.textContent = Math.round(s.musicStart)+"s";
+  } else if(project.musicBlob){
+    presetMusicSel.value = ""; currentPresetMusicPath = null;
+    await loadMusicFromFile(project.musicBlob);
+    musicStartRange.value = s.musicStart; musicStartLabel.textContent = Math.round(s.musicStart)+"s";
+  } else {
+    musicEl = null; musicStatus.textContent = "";
+  }
+
+  renderThumbs(); filmstripSet.render(); shuffleSet.render(); bradySet.render();
+  repaintIdle();
+}
+
+const projectSel = document.getElementById("projectSel");
+async function refreshProjectList(){
+  const db = await openProjectsDB();
+  const names = await new Promise((res,rej)=>{
+    const tx = db.transaction("projects","readonly");
+    const req = tx.objectStore("projects").getAllKeys();
+    req.onsuccess = ()=>res(req.result); req.onerror = ()=>rej(req.error);
+  });
+  projectSel.innerHTML = "";
+  if(!names.length){ projectSel.innerHTML = `<option value="">— no saved projects yet —</option>`; return; }
+  names.forEach(n=>{ const o=document.createElement("option"); o.value=o.textContent=n; projectSel.appendChild(o); });
+}
+document.getElementById("saveProjectBtn").addEventListener("click", async ()=>{
+  const name = prompt("Name this project (e.g. Fancy Sailors 2026):");
+  if(!name) return;
+  statusEl.textContent = "Saving project…";
+  try{
+    await saveProject(name);
+    await refreshProjectList();
+    projectSel.value = name;
+    statusEl.innerHTML = `Project <b>${name}</b> saved on this device. Come back any time and hit Load.`;
+  }catch(e){
+    statusEl.textContent = "Couldn't save the project — this browser's storage might be full.";
+  }
+});
+document.getElementById("loadProject").addEventListener("click", async ()=>{
+  const name = projectSel.value; if(!name) return;
+  statusEl.textContent = "Loading project…";
+  try{
+    await loadProject(name);
+    statusEl.innerHTML = `Project <b>${name}</b> loaded.`;
+  }catch(e){
+    statusEl.textContent = "Couldn't load that project.";
+  }
+});
+document.getElementById("deleteProject").addEventListener("click", async ()=>{
+  const name = projectSel.value; if(!name) return;
+  if(!confirm(`Delete saved project "${name}"? This can't be undone.`)) return;
+  const db = await openProjectsDB();
+  await new Promise((res,rej)=>{
+    const tx = db.transaction("projects","readwrite");
+    tx.objectStore("projects").delete(name);
+    tx.oncomplete = res; tx.onerror = ()=>rej(tx.error);
+  });
+  await refreshProjectList();
+  statusEl.textContent = `Project "${name}" deleted.`;
+});
+
 /* ---------------- init ---------------- */
 drawHeaderStripe();
 fillPresetSelect();
 applyTemplate("Girly Carnival");
+refreshProjectList();
 document.fonts.ready.then(repaintIdle);
 </script>
 </body>
