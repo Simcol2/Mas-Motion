@@ -496,7 +496,7 @@ function addFiles(list){
     const isVid = f.type.startsWith("video/") || /\.(mp4|mov|webm|m4v|3gp)$/i.test(f.name);
     if(f.type.startsWith("image/")){
       const el = new Image(); el.src = url;
-      el.onload = ()=>{ media.push({kind:"img", el, url}); renderThumbs(); repaintIdle(); scheduleAutosave(); };
+      el.onload = ()=>{ media.push({kind:"img", el, url, blob:f}); renderThumbs(); repaintIdle(); scheduleAutosave(); };
       el.onerror = ()=>{ statusEl.innerHTML = `Couldn't read image <b>${f.name}</b>.`; };
     } else if(isVid){
       const el = document.createElement("video");
@@ -505,8 +505,9 @@ function addFiles(list){
       el.onloadedmetadata = ()=>{
         if(done) return; done = true;
         const dur = (el.duration && isFinite(el.duration)) ? el.duration : 3;
-        media.push({kind:"vid", el, url, dur, trim:{start:0, len:Math.min(3, dur)}});
-        renderThumbs(); repaintIdle(); scheduleAutosave();
+        const m = {kind:"vid", el, url, dur, trim:{start:0, len:Math.min(3, dur)}, blob:f};
+        media.push(m);
+        renderThumbs(); repaintIdle(); scheduleAutosave(); queuePoster(m);
       };
       el.onerror = ()=>{
         if(done) return; done = true;
@@ -522,12 +523,73 @@ function addFiles(list){
     }
   });
 }
+/* Video thumbnails are single captured stills (posters), NOT live <video> elements.
+   A live <video> per thumbnail meant dozens of simultaneous videos with many clips —
+   far past what phone browsers allow — so loading/reordering randomly blanked
+   thumbnails and knocked those clips out of playback. One working <video> per clip now. */
+const BLANK_POSTER = (()=>{
+  const c=document.createElement("canvas"); c.width=76; c.height=76;
+  const x=c.getContext("2d"); x.fillStyle="#2A2536"; x.fillRect(0,0,76,76);
+  x.fillStyle="#fff"; x.globalAlpha=.7;
+  x.beginPath(); x.moveTo(30,25); x.lineTo(30,51); x.lineTo(53,38); x.closePath(); x.fill();
+  return c.toDataURL();
+})();
+const posterCanvas = document.createElement("canvas");
+let posterBusy = false;
+const posterQueue = [];
+function queuePoster(m){
+  if(!m || m.kind!=="vid" || m.poster || m._posterQueued) return;
+  m._posterQueued = true;
+  posterQueue.push(m); runPosterQueue();
+}
+async function runPosterQueue(){
+  if(posterBusy) return; posterBusy = true;
+  while(posterQueue.length){
+    const m = posterQueue.shift();
+    if(!m || m.kind!=="vid" || m.poster || media.indexOf(m)===-1){ if(m) m._posterQueued=false; continue; }
+    try{ await capturePoster(m); }catch(e){}
+    m._posterQueued = false;
+    renderThumbs();
+  }
+  posterBusy = false;
+}
+function capturePoster(m){
+  return new Promise(resolve=>{
+    const v = m.el; let done = false;
+    const finish = ()=>{
+      if(done) return; done = true;
+      v.removeEventListener("timeupdate", onTick);
+      try{
+        if(v.videoWidth && v.readyState >= 2){
+          const vw = v.videoWidth, vh = v.videoHeight;
+          const Wp = 160, Hp = Math.max(1, Math.round(Wp*vh/vw));
+          posterCanvas.width = Wp; posterCanvas.height = Hp;
+          posterCanvas.getContext("2d").drawImage(v, 0, 0, Wp, Hp);
+          m.poster = posterCanvas.toDataURL("image/jpeg", 0.6);
+        }
+      }catch(e){}
+      try{ v.pause(); v.preload = "metadata"; }catch(e){}   // release the decoder again
+      resolve();
+    };
+    // Briefly PLAY the clip (muted) — that forces a real decoded frame — then grab & pause.
+    // Seeking alone often hands back a not-yet-decoded (black) frame, especially on webm.
+    const onTick = ()=>{ if(v.currentTime > 0 && v.readyState >= 2 && v.videoWidth) finish(); };
+    try{
+      v.preload = "auto"; v.muted = true;
+      try{ v.currentTime = Math.min(Math.max(0.03,(m.trim && m.trim.start)||0.1), Math.max(0.05,(v.duration||1)-0.05)); }catch(e){}
+      v.addEventListener("timeupdate", onTick);
+      const p = v.play();
+      if(p && p.catch) p.catch(()=>finish());
+      setTimeout(finish, 4000);
+    }catch(e){ finish(); }
+  });
+}
 function renderThumbs(){
   const wrap = document.getElementById("thumbs"); wrap.innerHTML = "";
   media.forEach((m,i)=>{
     const t = document.createElement("div"); t.className = "thumb" + (i===trimIndex?" trimming":"");
     const mediaEl = m.kind==="img" ? `<img src="${m.url}" alt="slide ${i+1}">`
-      : `<video src="${m.url}" muted playsinline></video><span class="vid-badge">${m.trim.len}s</span>`;
+      : `<img src="${m.poster || BLANK_POSTER}" alt="clip ${i+1}"><span class="vid-badge">${m.trim.len}s</span>`;
     const cut = m.kind==="vid" ? `<button title="Trim clip" data-a="cut" data-i="${i}">✂</button>` : "";
     t.innerHTML = mediaEl + `
       <div class="tools">
@@ -546,6 +608,7 @@ function renderThumbs(){
     if(a==="cut"){ openTrim(i); return; }
     renderThumbs(); repaintIdle(); scheduleAutosave();
   }));
+  media.forEach(m=>{ if(m.kind==="vid" && !m.poster) queuePoster(m); });
   statusEl.textContent = media.length ? `${media.length} slide${media.length>1?"s":""} loaded.` : "Add media to begin.";
 }
 
@@ -577,7 +640,10 @@ trimStart.addEventListener("input", ()=>{ updateTrimReadout();
   const m = media[trimIndex]; if(m){ m.el.currentTime = m.trim.start; }
 });
 trimLen.addEventListener("change", ()=>{ updateTrimReadout(); renderThumbs(); document.querySelectorAll(".thumb")[trimIndex]?.classList.add("trimming"); scheduleAutosave(); });
-document.getElementById("trimClose").addEventListener("click", ()=>{ closeTrim(); scheduleAutosave(); });
+document.getElementById("trimClose").addEventListener("click", ()=>{
+  const m = media[trimIndex]; if(m && m.kind==="vid"){ m.poster=null; m._posterQueued=false; queuePoster(m); }
+  closeTrim(); scheduleAutosave();
+});
 document.getElementById("trimPreview").addEventListener("click", ()=>{
   if(trimIndex<0) return;
   const m = media[trimIndex];
@@ -1480,7 +1546,7 @@ function makePhotoSet(prefix, {cap=Infinity} = {}){
       queued++;
       const url = URL.createObjectURL(f);
       const img = new Image();
-      img.onload = ()=>{ if(arr.length < cap) arr.push({el:img, url}); render(); repaintIdle(); scheduleAutosave(); };
+      img.onload = ()=>{ if(arr.length < cap) arr.push({el:img, url, blob:f}); render(); repaintIdle(); scheduleAutosave(); };
       img.onerror = ()=>{ statusEl.innerHTML = `Couldn't read image <b>${f.name}</b>.`; };
       img.src = url;
     });
@@ -1757,14 +1823,18 @@ function openProjectsDB(){
   });
 }
 async function blobFromUrl(url){ return (await fetch(url)).blob(); }
+/* Prefer the original File kept in memory over re-fetching the blob: URL. With many large
+   clips, fetch(blob:url) under memory pressure was throwing "Failed to fetch" and killing
+   the whole save — reading the retained blob avoids that path entirely. */
+async function blobOf(m){ return m.blob || await blobFromUrl(m.url); }
 async function blobsFromSet(set){
-  return Promise.all(set.arr.map(async m=>({blob: await blobFromUrl(m.url)})));
+  return Promise.all(set.arr.map(async m=>({blob: await blobOf(m)})));
 }
 async function loadImageBlobInto(set, blob){
   return new Promise(resolve=>{
     const url = URL.createObjectURL(blob);
     const img = new Image();
-    img.onload = ()=>{ set.arr.push({el:img, url}); resolve(); };
+    img.onload = ()=>{ set.arr.push({el:img, url, blob}); resolve(); };
     img.src = url;
   });
 }
@@ -1777,8 +1847,8 @@ async function buildProjectRecord(name){
     name, savedAt: Date.now(),
     media: await Promise.all(media.map(async m=>
       m.kind==="vid"
-        ? { kind:"vid", blob: await blobFromUrl(m.url), trim:m.trim, dur:m.dur }
-        : { kind:"img", blob: await blobFromUrl(m.url) }
+        ? { kind:"vid", blob: await blobOf(m), trim:m.trim, dur:m.dur }
+        : { kind:"img", blob: await blobOf(m) }
     )),
     filmstrip: await blobsFromSet(filmstripSet),
     shuffle: await blobsFromSet(shuffleSet),
@@ -1822,7 +1892,7 @@ async function saveProject(name){ await writeRecord(await buildProjectRecord(nam
 /* ---------- auto-save: your work survives a refresh with nothing to click ---------- */
 const AUTOSAVE_KEY = "__autosave__";
 let autosaveTimer = null, autosaveBusy = false, autosaveReady = false;
-function scheduleAutosave(delay=1200){
+function scheduleAutosave(delay=2500){
   if(!autosaveReady) return; // don't fire while a project is still being restored/loaded
   clearTimeout(autosaveTimer);
   autosaveTimer = setTimeout(runAutosave, delay);
@@ -1855,7 +1925,7 @@ async function applyProjectRecord(project){
     if(m.kind==="img"){
       await new Promise(res=>{
         const el=new Image(); let done=false;
-        el.onload=()=>{ if(done)return; done=true; media.push({kind:"img", el, url}); res(); };
+        el.onload=()=>{ if(done)return; done=true; media.push({kind:"img", el, url, blob:m.blob}); res(); };
         el.onerror=()=>{ if(done)return; done=true; res(); };
         setTimeout(()=>{ if(done)return; done=true; res(); }, 6000);
         el.src=url;
@@ -1865,7 +1935,7 @@ async function applyProjectRecord(project){
         const el=document.createElement("video");
         el.muted=true; el.playsInline=true; el.preload="metadata";
         let done=false;
-        el.onloadedmetadata=()=>{ if(done)return; done=true; media.push({kind:"vid", el, url, dur:m.dur, trim:m.trim}); res(); };
+        el.onloadedmetadata=()=>{ if(done)return; done=true; media.push({kind:"vid", el, url, dur:m.dur, trim:m.trim, blob:m.blob}); res(); };
         el.onerror=()=>{ if(done)return; done=true; res(); };
         setTimeout(()=>{ if(done)return; done=true; res(); }, 6000);
         el.src=url;
