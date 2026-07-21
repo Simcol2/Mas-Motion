@@ -375,11 +375,6 @@
 </main>
 
 <script>
-window.addEventListener("error", (e)=>{
-  const s = document.getElementById("status");
-  if(s) s.innerHTML = `Something went wrong: <b>${(e.message||"unknown error").replace(/</g,"&lt;")}</b> (line ${e.lineno||"?"}). Try reloading the page. If it keeps happening, tap the app's feedback / thumbs-down to report it.`;
-  console.error("Mas Motion error:", e.error || e.message, e);
-});
 /* ---------------- storage (safe: falls back to memory if blocked) -------- */
 const memStore = {};
 const store = {
@@ -396,4 +391,1142 @@ function drawHeaderStripe(){
 
 /* ---------------- built-in video templates (style the VIDEO only) -------- */
 const BUILT_IN = {
-  "Girly Carnival":           {text:"#FFFFFF", accent:"#FF2E93", bg:"#FFFFFF", font:"Unbounded", motion:"shuffle", stripe:["#1E90D6","#FF2E93"
+  "Girly Carnival":           {text:"#FFFFFF", accent:"#FF2E93", bg:"#FFFFFF", font:"Unbounded", motion:"shuffle", stripe:["#1E90D6","#FF2E93","#3FE0D0","#FFD31D"], beatSync:true},
+  "Black Stars ’26 (Ghana)":  {text:"#FFFFFF", accent:"#FCD116", bg:"#111111", font:"Unbounded", motion:"shuffle", stripe:["#CE1126","#FCD116","#006B3F","#000000"], beatSync:true},
+  "Haiti":                    {text:"#FFFFFF", accent:"#F1B517", bg:"#00209F", font:"Unbounded", motion:"punch", stripe:["#00209F","#D21034","#F1B517"], beatSync:true},
+  "Trinidad & Tobago":        {text:"#FFFFFF", accent:"#DA1A35", bg:"#FFFFFF", font:"Archivo Black", motion:"glitch", stripe:["#DA1A35","#FFFFFF","#000000"], beatSync:true},
+  "Jamaica":                  {text:"#FFFFFF", accent:"#FED100", bg:"#FFFFFF", font:"Archivo Black", motion:"whip", stripe:["#009B3A","#FED100","#000000"], beatSync:true}
+};
+let currentStripe = BUILT_IN["Girly Carnival"].stripe.slice();
+
+function allTemplates(){ return Object.assign({}, BUILT_IN, store.get("masMotionTemplates") || {}); }
+function fillPresetSelect(){
+  const sel = document.getElementById("presetSel"); sel.innerHTML = "";
+  Object.keys(allTemplates()).forEach(name=>{
+    const o = document.createElement("option"); o.value = o.textContent = name; sel.appendChild(o);
+  });
+}
+function applyTemplate(name){
+  const p = allTemplates()[name]; if(!p) return;
+  cText.value = p.text; cAccent.value = p.accent; cBg.value = p.bg;
+  fontSel.value = p.font; motionSel.value = p.motion || "shuffle";
+  currentStripe = p.stripe.slice();
+  if(p.beatSync !== undefined) beatSyncBox.checked = p.beatSync;
+  if(p.duration){ durRange.value = p.duration; durLabel.textContent = p.duration+"s"; }
+  if(p.aspect){ aspectSel.value = p.aspect; setAspect(); }
+  repaintIdle();
+}
+
+/* ---------------- state ---------------- */
+const media = [];        // {kind:'img'|'vid', el, url, trim:{start,len}, dur}
+let musicEl = null, musicSrcNode = null, sharedAudioCtx = null;
+let beats = [];
+let boundaries = [];
+let transSeq = [], lineAnims = [];
+let playing = false, recording = false, rafId = null, startTs = 0;
+let trimIndex = -1;
+
+const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+const statusEl = document.getElementById("status"), progFill = document.getElementById("progFill");
+const dlLink = document.getElementById("dlLink");
+const motionSel = document.getElementById("motionSel");
+const beatSyncBox = document.getElementById("beatSync");
+const musicStatus = document.getElementById("musicStatus");
+
+/* ---------------- media upload ---------------- */
+const drop = document.getElementById("drop"), fileInput = document.getElementById("fileInput");
+drop.addEventListener("keydown", e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); fileInput.click(); } });
+drop.addEventListener("dragover", e=>{e.preventDefault(); drop.classList.add("over");});
+drop.addEventListener("dragleave", ()=>drop.classList.remove("over"));
+drop.addEventListener("drop", e=>{e.preventDefault(); drop.classList.remove("over"); addFiles(e.dataTransfer.files);});
+fileInput.addEventListener("change", ()=>{ addFiles(fileInput.files); fileInput.value=""; });
+
+function addFiles(list){
+  const files = [...list];
+  if(!files.length) return;
+  statusEl.textContent = `Loading ${files.length} file${files.length>1?"s":""}…`;
+  files.forEach(f=>{
+    const url = URL.createObjectURL(f);
+    const isVid = f.type.startsWith("video/") || /\.(mp4|mov|webm|m4v|3gp)$/i.test(f.name);
+    if(f.type.startsWith("image/")){
+      const el = new Image(); el.src = url;
+      el.onload = ()=>{ media.push({kind:"img", el, url}); renderThumbs(); repaintIdle(); };
+      el.onerror = ()=>{ statusEl.innerHTML = `Couldn't read image <b>${f.name}</b>.`; };
+    } else if(isVid){
+      const el = document.createElement("video");
+      el.muted = true; el.playsInline = true; el.preload = "metadata";
+      let done = false;
+      el.onloadedmetadata = ()=>{
+        if(done) return; done = true;
+        const dur = (el.duration && isFinite(el.duration)) ? el.duration : 3;
+        media.push({kind:"vid", el, url, dur, trim:{start:0, len:Math.min(3, dur)}});
+        renderThumbs(); repaintIdle();
+      };
+      el.onerror = ()=>{
+        if(done) return; done = true;
+        statusEl.innerHTML = `Couldn't play <b>${f.name}</b> in this browser. iPhone videos (.mov / HEVC) usually need converting to MP4 first. Sharing from your gallery as "Most compatible" or through WhatsApp does this automatically.`;
+      };
+      setTimeout(()=>{
+        if(done) return; done = true;
+        statusEl.innerHTML = `<b>${f.name}</b> didn't load, so the format likely isn't supported here. Try an MP4 version of it.`;
+      }, 6000);
+      el.src = url;
+    } else {
+      statusEl.innerHTML = `<b>${f.name}</b> isn't a photo or video type this browser recognizes.`;
+    }
+  });
+}
+function renderThumbs(){
+  const wrap = document.getElementById("thumbs"); wrap.innerHTML = "";
+  media.forEach((m,i)=>{
+    const t = document.createElement("div"); t.className = "thumb" + (i===trimIndex?" trimming":"");
+    const mediaEl = m.kind==="img" ? `<img src="${m.url}" alt="slide ${i+1}">`
+      : `<video src="${m.url}" muted playsinline></video><span class="vid-badge">${m.trim.len}s</span>`;
+    const cut = m.kind==="vid" ? `<button title="Trim clip" data-a="cut" data-i="${i}">✂</button>` : "";
+    t.innerHTML = mediaEl + `
+      <div class="tools">
+        <button title="Move earlier" data-a="up" data-i="${i}">←</button>
+        ${cut}
+        <button class="del" title="Remove" data-a="del" data-i="${i}">×</button>
+        <button title="Move later" data-a="dn" data-i="${i}">→</button>
+      </div>`;
+    wrap.appendChild(t);
+  });
+  wrap.querySelectorAll("button").forEach(b=>b.addEventListener("click", ()=>{
+    const i = +b.dataset.i, a = b.dataset.a;
+    if(a==="del"){ media.splice(i,1); if(trimIndex===i) closeTrim(); }
+    if(a==="up" && i>0) [media[i-1],media[i]]=[media[i],media[i-1]];
+    if(a==="dn" && i<media.length-1) [media[i+1],media[i]]=[media[i],media[i+1]];
+    if(a==="cut"){ openTrim(i); return; }
+    renderThumbs(); repaintIdle();
+  }));
+  statusEl.textContent = media.length ? `${media.length} slide${media.length>1?"s":""} loaded.` : "Add media to begin.";
+}
+
+/* ---------------- trim editor ---------------- */
+const trimPanel = document.getElementById("trimPanel");
+const trimStart = document.getElementById("trimStart"), trimLen = document.getElementById("trimLen");
+const trimReadout = document.getElementById("trimReadout");
+
+function openTrim(i){
+  trimIndex = i;
+  const m = media[i];
+  trimLen.value = String(Math.round(m.trim.len));
+  trimStart.max = Math.max(0, m.dur - m.trim.len).toFixed(1);
+  trimStart.value = m.trim.start.toFixed(1);
+  document.getElementById("trimTitle").textContent = `Trim clip ${i+1} (${m.dur.toFixed(1)}s total)`;
+  trimPanel.classList.add("open");
+  updateTrimReadout(); renderThumbs();
+}
+function closeTrim(){ trimIndex = -1; trimPanel.classList.remove("open"); renderThumbs(); }
+function updateTrimReadout(){
+  if(trimIndex<0) return;
+  const m = media[trimIndex];
+  m.trim.len = Math.min(+trimLen.value, m.dur);
+  trimStart.max = Math.max(0, m.dur - m.trim.len).toFixed(1);
+  m.trim.start = Math.min(+trimStart.value, +trimStart.max);
+  trimReadout.textContent = `Using ${m.trim.start.toFixed(1)}s → ${(m.trim.start+m.trim.len).toFixed(1)}s`;
+}
+trimStart.addEventListener("input", ()=>{ updateTrimReadout();
+  const m = media[trimIndex]; if(m){ m.el.currentTime = m.trim.start; }
+});
+trimLen.addEventListener("change", ()=>{ updateTrimReadout(); renderThumbs(); document.querySelectorAll(".thumb")[trimIndex]?.classList.add("trimming"); });
+document.getElementById("trimClose").addEventListener("click", closeTrim);
+document.getElementById("trimPreview").addEventListener("click", ()=>{
+  if(trimIndex<0) return;
+  const m = media[trimIndex];
+  m.el.currentTime = m.trim.start; m.el.play();
+  setTimeout(()=>m.el.pause(), m.trim.len*1000);
+  const preview = document.querySelectorAll(".thumb")[trimIndex]?.querySelector("video");
+  if(preview){ preview.currentTime = m.trim.start; preview.play(); setTimeout(()=>preview.pause(), m.trim.len*1000); }
+});
+
+/* Smart Pick: scans the video for the window with the most motion */
+function seekTo(v,t){
+  return new Promise(res=>{
+    const h=()=>{ v.removeEventListener("seeked",h); res(); };
+    v.addEventListener("seeked",h);
+    v.currentTime = Math.min(t, (v.duration||t) - 0.05);
+  });
+}
+document.getElementById("smartPick").addEventListener("click", async ()=>{
+  if(trimIndex<0) return;
+  const m = media[trimIndex], v = m.el;
+  const btn = document.getElementById("smartPick");
+  btn.disabled = true; btn.textContent = "Scanning…";
+  try{
+    const dur = m.dur, len = m.trim.len;
+    const step = Math.max(0.35, dur/48);
+    const c = document.createElement("canvas"); c.width = 64; c.height = 64;
+    const cx = c.getContext("2d", {willReadFrequently:true});
+    let prev = null; const scores = [];
+    v.pause();
+    for(let t=0.1; t<dur-0.1; t+=step){
+      await seekTo(v,t);
+      cx.drawImage(v,0,0,64,64);
+      const d = cx.getImageData(0,0,64,64).data;
+      if(prev){
+        let s=0;
+        for(let i=0;i<d.length;i+=16) s += Math.abs(d[i]-prev[i]) + Math.abs(d[i+1]-prev[i+1]);
+        scores.push({t,s});
+      }
+      prev = d.slice();
+      btn.textContent = `Scanning ${Math.round(t/dur*100)}%`;
+    }
+    let best = -1, bestT = 0;
+    for(let i=0;i<scores.length;i++){
+      let sum = 0;
+      for(let j=i; j<scores.length && scores[j].t < scores[i].t + len; j++) sum += scores[j].s;
+      if(sum > best){ best = sum; bestT = scores[i].t; }
+    }
+    m.trim.start = Math.max(0, Math.min(bestT, dur - len));
+    trimStart.value = m.trim.start.toFixed(1);
+    updateTrimReadout();
+    await seekTo(v, m.trim.start);
+    statusEl.innerHTML = `Smart Pick chose <b>${m.trim.start.toFixed(1)}s → ${(m.trim.start+len).toFixed(1)}s</b>, the busiest ${len} seconds. Nudge the slider if it missed the moment.`;
+  } finally {
+    btn.disabled = false; btn.textContent = "✨ Smart Pick";
+  }
+});
+
+/* ---------------- text lines ---------------- */
+const textLines = document.getElementById("textLines");
+function addTextLine(val=""){
+  if(textLines.children.length >= 8) return;
+  const d = document.createElement("div"); d.className = "textline";
+  d.innerHTML = `<input type="text" maxlength="70" placeholder="e.g. CARNIVAL BABY SZN" value="${val.replace(/"/g,'&quot;')}"><button title="Remove line">×</button>`;
+  d.querySelector("button").addEventListener("click", ()=>d.remove());
+  textLines.appendChild(d);
+}
+document.getElementById("addLine").addEventListener("click", ()=>addTextLine());
+addTextLine(); addTextLine();
+function getLines(){ return [...textLines.querySelectorAll("input")].map(i=>i.value.trim()).filter(Boolean); }
+
+/* ---------------- settings ---------------- */
+const durRange = document.getElementById("durRange"), durLabel = document.getElementById("durLabel");
+durRange.addEventListener("input", ()=>durLabel.textContent = durRange.value + "s");
+const aspectSel = document.getElementById("aspectSel");
+function setAspect(){
+  const map = {"9x16":[1080,1920], "1x1":[1080,1080], "16x9":[1920,1080]};
+  [cv.width, cv.height] = map[aspectSel.value]; repaintIdle();
+}
+aspectSel.addEventListener("change", setAspect);
+["cText","cAccent","cBg","fontSel","stripeOn"].forEach(id=>{
+  document.getElementById(id).addEventListener("input", repaintIdle);
+});
+document.getElementById("presetSel").addEventListener("change", e=>applyTemplate(e.target.value));
+document.getElementById("savePreset").addEventListener("click", ()=>{
+  const name = prompt("Name this template (e.g. Hype reel):");
+  if(!name) return;
+  const saved = store.get("masMotionTemplates") || {};
+  saved[name] = {
+    text:cText.value, accent:cAccent.value, bg:cBg.value, font:fontSel.value,
+    motion:motionSel.value, stripe:currentStripe.slice(),
+    beatSync:beatSyncBox.checked, duration:+durRange.value, aspect:aspectSel.value
+  };
+  store.set("masMotionTemplates", saved);
+  fillPresetSelect(); document.getElementById("presetSel").value = name;
+  statusEl.innerHTML = `Template <b>${name}</b> saved. Load it any time and just swap the media.`;
+});
+
+/* ---------------- music + beat detection ---------------- */
+const musicStartRange = document.getElementById("musicStartRange"), musicStartLabel = document.getElementById("musicStartLabel");
+function musicStartSec(){ return +musicStartRange.value || 0; }
+function activeBeats(){
+  const off = musicStartSec();
+  if(!off) return beats;
+  return beats.filter(b=>b>=off).map(b=>b-off);
+}
+musicStartRange.addEventListener("input", ()=>{ musicStartLabel.textContent = Math.round(+musicStartRange.value)+"s"; repaintIdle(); });
+
+document.getElementById("musicInput").addEventListener("change", async e=>{
+  const f = e.target.files[0]; if(!f) return;
+  if(musicEl){ musicEl.pause(); }
+  musicEl = new Audio(URL.createObjectURL(f)); musicEl.preload = "auto";
+  musicSrcNode = null; beats = [];
+  musicStartRange.value = 0; musicStartRange.disabled = true; musicStartRange.max = 0;
+  musicStartLabel.textContent = "0s";
+  musicStatus.textContent = "Listening for the beat…";
+  try{
+    const buf = await f.arrayBuffer();
+    if(!sharedAudioCtx) sharedAudioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    const audio = await sharedAudioCtx.decodeAudioData(buf.slice(0));
+    beats = detectBeats(audio);
+    musicStartRange.max = Math.max(0, Math.floor(audio.duration - 1));
+    musicStartRange.disabled = false;
+    musicStatus.textContent = beats.length
+      ? `♪ Found ${beats.length} beats. Slides will land on them.`
+      : "♪ Loaded. Couldn't find a clear beat, slides will space evenly.";
+  }catch(err){
+    musicStatus.textContent = "♪ Loaded (beat scan not supported here, slides will space evenly).";
+  }
+});
+function detectBeats(buf){
+  const data = buf.getChannelData(0);
+  const win = 2048, spb = win/buf.sampleRate;
+  const energies = [];
+  for(let i=0; i<data.length-win; i+=win){
+    let e=0;
+    for(let j=i; j<i+win; j+=8) e += data[j]*data[j];
+    energies.push(e);
+  }
+  const out = [], hist = Math.round(1/spb);
+  for(let i=2; i<energies.length-1; i++){
+    const a = Math.max(0, i-hist);
+    let avg=0; for(let k=a;k<i;k++) avg+=energies[k]; avg/=(i-a)||1;
+    if(energies[i] > 1.45*avg && energies[i] >= energies[i-1] && energies[i] >= energies[i+1]){
+      const t = i*spb;
+      if(!out.length || t - out[out.length-1] > 0.28) out.push(t);
+    }
+  }
+  return out;
+}
+
+/* Build slide boundaries: even spacing, snapped to nearest beats when possible */
+function computeBoundaries(){
+  const dur = +durRange.value, n = media.length;
+  const b = [0];
+  for(let i=1; i<n; i++){
+    let target = dur * i/n;
+    const abeats = activeBeats();
+    if(beatSyncBox.checked && abeats.length){
+      let bestBeat = null, bestDist = Infinity;
+      const tol = (dur/n) * 0.45;
+      abeats.forEach(bt=>{
+        const d = Math.abs(bt - target);
+        if(d < bestDist && d < tol && bt < dur){ bestDist = d; bestBeat = bt; }
+      });
+      if(bestBeat !== null) target = bestBeat;
+    }
+    if(target - b[b.length-1] < 0.5) target = b[b.length-1] + 0.5;
+    b.push(Math.min(target, dur - 0.3));
+  }
+  b.push(dur);
+  return b;
+}
+
+/* ---------------- logo & watermark controls ---------------- */
+let logoImg = null;
+const logoDrop = document.getElementById("logoDrop"), logoInput = document.getElementById("logoInput");
+const logoPreviewWrap = document.getElementById("logoPreviewWrap"), logoPreview = document.getElementById("logoPreview");
+const watermarkOn = document.getElementById("watermarkOn"), watermarkOpts = document.getElementById("watermarkOpts");
+const wmOpacity = document.getElementById("wmOpacity");
+const sectionName = document.getElementById("sectionName"), sectionWatermarkOn = document.getElementById("sectionWatermarkOn");
+const yearOn = document.getElementById("yearOn"), yearOpts = document.getElementById("yearOpts"), yearSel = document.getElementById("yearSel");
+const endLogoOn = document.getElementById("endLogoOn"), endLogoHint = document.getElementById("endLogoHint");
+
+(function fillYears(){
+  const now = new Date().getFullYear();
+  for(let y = now+1; y >= now-6; y--){
+    const o = document.createElement("option"); o.value = o.textContent = y;
+    if(y===now) o.selected = true;
+    yearSel.appendChild(o);
+  }
+})();
+
+logoDrop.addEventListener("keydown", e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); logoInput.click(); } });
+logoInput.addEventListener("change", ()=>{
+  const f = logoInput.files[0]; if(!f) return;
+  const url = URL.createObjectURL(f);
+  const img = new Image();
+  img.onload = ()=>{
+    logoImg = img;
+    logoPreview.src = url; logoPreviewWrap.style.display = "flex";
+    repaintIdle();
+  };
+  img.onerror = ()=>{ statusEl.textContent = "Couldn't read that logo image."; };
+  img.src = url;
+});
+document.getElementById("logoRemove").addEventListener("click", ()=>{
+  logoImg = null; logoInput.value = ""; logoPreviewWrap.style.display = "none";
+  watermarkOn.checked = false; endLogoOn.checked = false;
+  watermarkOpts.style.display = "none"; endLogoHint.style.display = "none";
+  repaintIdle();
+});
+watermarkOn.addEventListener("change", ()=>{
+  if(watermarkOn.checked && !logoImg){
+    watermarkOn.checked = false;
+    statusEl.textContent = "Upload a logo first, then turn on the watermark.";
+    return;
+  }
+  watermarkOpts.style.display = watermarkOn.checked ? "block" : "none";
+  repaintIdle();
+});
+wmOpacity.addEventListener("input", repaintIdle);
+sectionName.addEventListener("input", repaintIdle);
+sectionWatermarkOn.addEventListener("change", repaintIdle);
+yearOn.addEventListener("change", ()=>{ yearOpts.style.display = yearOn.checked ? "block" : "none"; repaintIdle(); });
+yearSel.addEventListener("change", repaintIdle);
+endLogoOn.addEventListener("change", ()=>{
+  if(endLogoOn.checked && !logoImg){
+    endLogoOn.checked = false;
+    statusEl.textContent = "Upload a logo first, then turn on the closing logo card.";
+    return;
+  }
+  endLogoHint.style.display = endLogoOn.checked ? "block" : "none";
+  repaintIdle();
+});
+
+/* ---------------- motion styles ---------------- */
+const TRANSITIONS = ["punch","whip","spin","glitch","swirl","bounce"];
+const TEXT_ANIMS = ["wordpop","box","slam"];
+let shuffleSeeds = [];
+function buildRunPlan(){
+  boundaries = computeBoundaries();
+  const style = motionSel.value;
+  const nT = Math.max(0, media.length - 1);
+  transSeq = [];
+  for(let i=0;i<nT;i++){
+    transSeq.push(style==="shuffle" ? TRANSITIONS[Math.floor(Math.random()*TRANSITIONS.length)] : style);
+  }
+  const lines = getLines();
+  lineAnims = lines.map(()=> style==="shuffle"
+    ? TEXT_ANIMS[Math.floor(Math.random()*TEXT_ANIMS.length)]
+    : (style==="whip" ? "wordpop" : style==="spin" ? "box" : "slam"));
+  shuffleSeeds = shuffleSet.arr.map(()=> (Math.random()-0.5)*0.16);
+}
+
+/* ---------------- drawing ---------------- */
+function coverDraw(el, W, H, scale=1, dx=0, dy=0, alpha=1){
+  const iw = el.videoWidth || el.naturalWidth, ih = el.videoHeight || el.naturalHeight;
+  if(!iw || !ih) return;
+  const s = Math.max(W/iw, H/ih) * scale;
+  const dw = iw*s, dh = ih*s;
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(el, (W-dw)/2 + dx, (H-dh)/2 + dy, dw, dh);
+  ctx.globalAlpha = 1;
+}
+function wrapText(text, maxW, fontPx, fam){
+  ctx.font = fontStr(fontPx, fam);
+  const words = text.split(" "), lines = []; let line = "";
+  words.forEach(w=>{
+    const test = line ? line+" "+w : w;
+    if(ctx.measureText(test).width > maxW && line){ lines.push(line); line = w; }
+    else line = test;
+  });
+  if(line) lines.push(line);
+  return lines;
+}
+function isLightColor(hex){
+  const r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
+  return (0.299*r + 0.587*g + 0.114*b) > 150;
+}
+function hexToRgb(hex){ return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]; }
+function hexA(hex,a){ const [r,g,b]=hexToRgb(hex); return `rgba(${r},${g},${b},${a})`; }
+function fontStr(px,fam){ return `${fam==="Cormorant Garamond"?"700":"800"} ${px}px "${fam}"`; }
+const easeOutBack  = p => { const c1=1.70158, c3=c1+1; return 1 + c3*Math.pow(p-1,3) + c1*Math.pow(p-1,2); };
+const easeOutQuint = p => 1 - Math.pow(1-p,5);
+const easeInOutQuart = p => p<0.5 ? 8*p*p*p*p : 1 - Math.pow(-2*p+2,4)/2;
+const clamp01 = v => Math.max(0, Math.min(1, v));
+function easeOutBounce(p){
+  const n1=7.5625, d1=2.75;
+  if(p < 1/d1) return n1*p*p;
+  if(p < 2/d1) return n1*(p-=1.5/d1)*p+0.75;
+  if(p < 2.5/d1) return n1*(p-=2.25/d1)*p+0.9375;
+  return n1*(p-=2.625/d1)*p+0.984375;
+}
+
+const off = document.createElement("canvas");
+const offCtx = off.getContext("2d");
+function drawToOff(el, W, H, scale){
+  if(off.width!==W || off.height!==H){ off.width=W; off.height=H; }
+  offCtx.clearRect(0,0,W,H);
+  const iw = el.videoWidth || el.naturalWidth, ih = el.videoHeight || el.naturalHeight;
+  if(!iw || !ih) return;
+  const s = Math.max(W/iw, H/ih)*scale, dw = iw*s, dh = ih*s;
+  offCtx.drawImage(el, (W-dw)/2, (H-dh)/2, dw, dh);
+}
+const off2 = document.createElement("canvas");
+const offCtx2 = off2.getContext("2d");
+function tintedCopy(srcCanvas, color, alpha){
+  if(off2.width!==srcCanvas.width || off2.height!==srcCanvas.height){ off2.width=srcCanvas.width; off2.height=srcCanvas.height; }
+  offCtx2.clearRect(0,0,off2.width,off2.height);
+  offCtx2.drawImage(srcCanvas,0,0);
+  offCtx2.globalCompositeOperation = "source-atop";
+  offCtx2.globalAlpha = alpha;
+  offCtx2.fillStyle = color;
+  offCtx2.fillRect(0,0,off2.width,off2.height);
+  offCtx2.globalAlpha = 1;
+  offCtx2.globalCompositeOperation = "source-over";
+  return off2;
+}
+/* draws el (already staged into `off` via drawToOff) with a cinematic RGB-split, at a given screen offset */
+function drawChromaFromOff(dx, dy, baseAlpha, split){
+  ctx.save();
+  ctx.globalCompositeOperation = "screen";
+  ctx.globalAlpha = baseAlpha*0.55;
+  ctx.drawImage(tintedCopy(off, "#FF2A55", .55), dx-split, dy);
+  ctx.globalAlpha = baseAlpha*0.55;
+  ctx.drawImage(tintedCopy(off, "#19E8FF", .55), dx+split, dy);
+  ctx.restore();
+  ctx.globalAlpha = baseAlpha;
+  ctx.drawImage(off, dx, dy);
+  ctx.globalAlpha = 1;
+}
+function beatPulse(t){
+  let last = -10;
+  const abeats = activeBeats();
+  const src = abeats.length ? abeats : boundaries;
+  for(const b of src){ if(b<=t) last=b; else break; }
+  const dt = t - last;
+  return dt>=0 ? Math.exp(-dt*7)*0.035 : 0;
+}
+function slideIndexAt(t){
+  for(let i=0;i<boundaries.length-1;i++){
+    if(t >= boundaries[i] && t < boundaries[i+1]) return i;
+  }
+  return media.length - 1;
+}
+function syncVideo(m, offset){
+  const v = m.el;
+  const end = m.trim.start + m.trim.len;
+  if(v.paused){ try{ v.currentTime = m.trim.start + (offset % m.trim.len); v.play(); }catch(e){} }
+  else if(v.currentTime >= end - 0.06 || v.currentTime < m.trim.start - 0.2){
+    try{ v.currentTime = m.trim.start; }catch(e){}
+  }
+}
+
+function renderFrame(t){
+  const W = cv.width, H = cv.height;
+  const mainDur = +durRange.value;
+  if(t < mainDur){ renderMainFrame(t, W, H); return; }
+  let cursor = mainDur;
+  const fLen = filmstripLen();
+  if(fLen > 0){ if(t < cursor+fLen){ drawFilmStrip(t-cursor, W, H); return; } cursor += fLen; }
+  const sLen = shuffleLen();
+  if(sLen > 0){ if(t < cursor+sLen){ drawShuffleSeg(t-cursor, W, H); return; } cursor += sLen; }
+  const bLen = bradyLen();
+  if(bLen > 0){ if(t < cursor+bLen){ drawBradySeg(t-cursor, W, H); return; } cursor += bLen; }
+  const oLen = outroLen();
+  if(oLen > 0){ drawOutroCard(t-cursor, W, H); addFilmLook(W,H); return; }
+  renderMainFrame(mainDur-0.001, W, H);
+}
+function renderMainFrame(t, W, H){
+  const accent = cAccent.value, txtCol = cText.value, fam = fontSel.value;
+  const dur = +durRange.value;
+  ctx.fillStyle = cBg.value; ctx.fillRect(0,0,W,H);
+  if(!media.length){ drawIdleCard(W,H,accent,fam); addFilmLook(W,H); return; }
+
+  const idx = Math.min(media.length-1, slideIndexAt(t));
+  const sd = boundaries[idx+1] - boundaries[idx];
+  const local = t - boundaries[idx];
+  const prog = Math.min(1, local/sd);
+
+  media.forEach((m,i)=>{
+    if(m.kind!=="vid") return;
+    if(i===idx || (i===idx+1 && local > sd - 0.6)) return;
+    if(!m.el.paused) m.el.pause();
+  });
+
+  /* everything breathes with the beat */
+  const pulse = 1 + beatPulse(t);
+  ctx.save();
+  ctx.translate(W/2,H/2); ctx.scale(pulse,pulse); ctx.translate(-W/2,-H/2);
+
+  const m = media[idx];
+  if(m.kind==="vid") syncVideo(m, local);
+  const kb = m.kind==="img" ? 1.06 + 0.14*prog : 1;
+  const dir = idx%2===0 ? 1 : -1;
+
+  const trW = Math.min(0.45, sd/2.5);
+  const inTrans = idx < media.length-1 && local > sd - trW;
+  let a=0, nx=null, tr="punch";
+  if(inTrans){
+    a = (local - (sd - trW)) / trW;
+    nx = media[idx+1];
+    if(nx.kind==="vid") syncVideo(nx, 0);
+    tr = transSeq[idx] || "punch";
+  }
+
+  if(!inTrans){
+    coverDraw(m.el, W, H, kb, dir * 0.025*W * prog, 0, 1);
+  } else if(tr==="whip"){
+    const e = easeInOutQuart(a), offX = W*e*dir;
+    const speed = Math.sin(a*Math.PI);
+    ctx.save();
+    ctx.filter = `blur(${Math.round(20*speed)}px)`;
+    coverDraw(m.el, W, H, kb, -offX, 0, 1);
+    coverDraw(nx.el, W, H, 1.02, dir*W - offX, 0, 1);
+    ctx.restore();
+    const crisp = 1 - speed;
+    if(crisp > 0.04){
+      coverDraw(m.el, W, H, kb, -offX, 0, crisp);
+      coverDraw(nx.el, W, H, 1.02, dir*W - offX, 0, crisp);
+    }
+  } else if(tr==="punch"){
+    const e = easeOutQuint(a);
+    ctx.save();
+    ctx.filter = `blur(${Math.round(16*(1-a))}px)`;
+    ctx.globalAlpha = clamp01(1 - a*1.1);
+    coverDraw(m.el, W, H, kb*(1+0.32*a), 0, 0, 1);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+    const shake = (a>0.15 && a<0.55) ? (Math.random()-0.5)*W*0.014*(1-a) : 0;
+    ctx.save();
+    if(a < 0.55) ctx.filter = `blur(${Math.round(14*(0.55-a))}px)`;
+    coverDraw(nx.el, W, H, 1.4 - 0.4*e, shake, shake*0.6, clamp01(a*2.2));
+    ctx.restore();
+  } else if(tr==="spin"){
+    const e = easeOutQuint(a);
+    const speed = Math.sin(a*Math.PI);
+    ctx.save();
+    ctx.filter = `blur(${Math.round(10*speed)}px)`;
+    coverDraw(m.el, W, H, kb, 0, 0, clamp01(1-a*1.2));
+    ctx.restore();
+    ctx.save();
+    ctx.translate(W/2,H/2); ctx.rotate((1-e)*0.22*dir); ctx.translate(-W/2,-H/2);
+    ctx.filter = `blur(${Math.round(12*speed)}px)`;
+    coverDraw(nx.el, W, H, 1 + 0.45*(1-e), 0, 0, clamp01(a*1.8));
+    ctx.restore();
+  } else if(tr==="glitch"){
+    const src = a < 0.5 ? m : nx;
+    drawToOff(src.el, W, H, src===m ? kb : 1.02);
+    const slices = 10, sliceH = H/slices;
+    const amp = Math.sin(a*Math.PI) * 0.08 * W;
+    ctx.save();
+    for(let s2=0; s2<slices; s2++){
+      ctx.beginPath(); ctx.rect(0, s2*sliceH, W, sliceH); ctx.clip();
+      const dx = Math.random() < 0.55 ? (Math.random()-0.5)*2*amp : 0;
+      if(Math.random() < 0.4){
+        drawChromaFromOff(dx, 0, 1, amp*0.16);
+      } else {
+        ctx.drawImage(off, dx, 0);
+      }
+      ctx.restore(); ctx.save();
+    }
+    ctx.restore();
+    if(Math.random() < 0.35){ ctx.fillStyle = hexA(accent, 0.14); ctx.fillRect(0,0,W,H); }
+    ctx.save();
+    ctx.globalAlpha = .1; ctx.fillStyle = "#000";
+    for(let y=0; y<H; y+=4) ctx.fillRect(0,y,W,1);
+    ctx.restore();
+  } else if(tr==="swirl"){
+    const e = easeOutBack(a);
+    ctx.save();
+    ctx.globalAlpha = clamp01(1 - a*1.2);
+    coverDraw(m.el, W, H, kb, 0, 0, 1);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(W/2,H/2);
+    ctx.rotate((1-e)*1.1*dir);
+    ctx.scale(0.25+0.75*e, 0.25+0.75*e);
+    ctx.translate(-W/2,-H/2);
+    coverDraw(nx.el, W, H, 1, 0, 0, clamp01(a*1.8));
+    ctx.restore();
+  } else if(tr==="bounce"){
+    const e = easeOutBounce(a);
+    ctx.save();
+    ctx.globalAlpha = clamp01(1 - a*1.3);
+    coverDraw(m.el, W, H, kb, 0, 0, 1);
+    ctx.restore();
+    const dropFrom = -H*0.5*(1-e);
+    coverDraw(nx.el, W, H, 1, 0, dropFrom, clamp01(a*1.6));
+  }
+
+  drawTexts(t, W, H, dur, accent, txtCol, fam);
+  ctx.restore();
+
+  if(idx>0 && local < 0.11){
+    const fp = 1 - local/0.11;
+    const sweepDir = (idx%2===0) ? -1 : 1;
+    const cx0 = W/2 + sweepDir * W*0.9*(1-fp);
+    const grad = ctx.createLinearGradient(cx0 - W*0.16, 0, cx0 + W*0.16, 0);
+    grad.addColorStop(0, "rgba(255,255,255,0)");
+    grad.addColorStop(.5, `rgba(255,255,255,${(0.5*fp).toFixed(3)})`);
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.save();
+    ctx.globalCompositeOperation = "screen";
+    ctx.fillStyle = grad;
+    ctx.fillRect(0,0,W,H);
+    ctx.restore();
+  }
+
+  if(document.getElementById("stripeOn").checked){
+    const sh = Math.round(H*0.012), seg = W/currentStripe.length;
+    currentStripe.forEach((c,i)=>{ ctx.fillStyle = c; ctx.fillRect(i*seg, H-sh, seg+1, sh); });
+  }
+  addFilmLook(W,H);
+  drawWatermarkYear(W,H);
+}
+
+/* ---------------- kinetic text ---------------- */
+function drawTexts(t, W, H, dur, accent, txtCol, fam){
+  const lines = getLines(); if(!lines.length) return;
+  const showFor = Math.min(2.8, dur/(lines.length+1));
+  lines.forEach((line,i)=>{
+    const center = dur * (i+1)/(lines.length+1);
+    const lt = t - (center - showFor/2);
+    if(lt < 0 || lt > showFor) return;
+    const exitP = clamp01((showFor - lt)/0.3);
+    const style = lineAnims[i] || "slam";
+    const fontPx = Math.round(W * (fam==="Cormorant Garamond" ? 0.09 : 0.08));
+    const text = line.toUpperCase();
+    ctx.save();
+    ctx.globalAlpha = exitP;
+    if(exitP < 1){
+      const s2 = 1 + (1-exitP)*0.06;
+      ctx.translate(W/2,H/2); ctx.scale(s2,s2); ctx.translate(-W/2,-H/2);
+    }
+    const cy = H*0.5;
+    const grd = ctx.createLinearGradient(0, cy-fontPx*2.2, 0, cy+fontPx*2.2);
+    grd.addColorStop(0,"rgba(0,0,0,0)"); grd.addColorStop(.5,`rgba(0,0,0,${0.30*exitP})`); grd.addColorStop(1,"rgba(0,0,0,0)");
+    ctx.fillStyle = grd; ctx.fillRect(0, cy-fontPx*2.2, W, fontPx*4.4);
+    if(style==="wordpop") drawWordPop(text, lt, W, H, fontPx, fam, txtCol);
+    else if(style==="box") drawBoxText(text, lt, W, H, fontPx, fam, accent);
+    else drawSlam(text, lt, W, H, fontPx, fam, txtCol, accent);
+    ctx.restore();
+  });
+}
+function drawWordPop(text, lt, W, H, fontPx, fam, txtCol){
+  ctx.font = fontStr(fontPx, fam);
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  const maxW = W*0.84, spaceW = ctx.measureText(" ").width;
+  const words = text.split(" ");
+  const rows = []; let row = [], rowW = 0;
+  words.forEach(w=>{
+    const ww = ctx.measureText(w).width;
+    if(rowW + ww > maxW && row.length){ rows.push({row, rowW: rowW - spaceW}); row = []; rowW = 0; }
+    row.push({w, ww}); rowW += ww + spaceW;
+  });
+  if(row.length) rows.push({row, rowW: rowW - spaceW});
+  const lineH = fontPx*1.15, cy = H*0.5;
+  const stagger = Math.min(0.1, 0.5/words.length);
+  let wi = 0;
+  ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = fontPx*0.35; ctx.shadowOffsetY = fontPx*0.05;
+  rows.forEach((r,ri)=>{
+    let x = W/2 - r.rowW/2;
+    const y = cy + (ri - (rows.length-1)/2)*lineH;
+    r.row.forEach(o=>{
+      const p = clamp01((lt - wi*stagger)/0.32);
+      if(p > 0){
+        const s = easeOutBack(p);
+        ctx.save();
+        ctx.translate(x + o.ww/2, y); ctx.scale(s,s);
+        ctx.globalAlpha *= p;
+        ctx.fillStyle = txtCol;
+        ctx.fillText(o.w, -o.ww/2, 0);
+        ctx.restore();
+      }
+      x += o.ww + spaceW; wi++;
+    });
+  });
+  ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+}
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+function drawBoxText(text, lt, W, H, fontPx, fam, accent){
+  ctx.font = fontStr(fontPx, fam);
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const wrapped = wrapText(text, W*0.76, fontPx, fam);
+  const lineH = fontPx*1.32, cy = H*0.5;
+  const darkOnAccent = isLightColor(accent);
+  const wob = Math.sin(lt*2.4)*0.012;
+  wrapped.forEach((w,li)=>{
+    const p = easeOutBack(clamp01((lt - li*0.09)/0.34));
+    if(p <= 0) return;
+    const tw = ctx.measureText(w).width, pad = fontPx*0.4;
+    const y = cy + (li - (wrapped.length-1)/2)*lineH;
+    ctx.save();
+    ctx.translate(W/2, y);
+    ctx.rotate((li%2===0 ? -0.028 : 0.02) + wob);
+    ctx.scale(p, p);
+    ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = fontPx*0.4; ctx.shadowOffsetY = fontPx*0.08;
+    ctx.fillStyle = accent;
+    roundRect(-tw/2 - pad, -lineH*0.46, tw + pad*2, lineH*0.92, fontPx*0.22);
+    ctx.fill();
+    ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+    ctx.fillStyle = darkOnAccent ? "#241E3F" : "#FFFFFF";
+    ctx.fillText(w, 0, 0);
+    ctx.restore();
+  });
+}
+function drawSlam(text, lt, W, H, fontPx, fam, txtCol, accent){
+  const big = Math.round(fontPx*1.12);
+  ctx.font = fontStr(big, fam);
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const wrapped = wrapText(text, W*0.86, big, fam);
+  const lineH = big*1.12, cy = H*0.5;
+  const p = clamp01(lt/0.22);
+  const s = 2.3 - 1.3*easeOutQuint(p);
+  let jx=0, jy=0;
+  if(p >= 1 && lt < 0.42){
+    const k = (0.42 - lt)/0.2;
+    jx = (Math.random()-0.5)*big*0.16*k;
+    jy = (Math.random()-0.5)*big*0.10*k;
+  }
+  ctx.save();
+  ctx.translate(W/2 + jx, cy + jy); ctx.scale(s, s);
+  ctx.globalAlpha *= clamp01(p*1.6);
+  const wMax = Math.max(...wrapped.map(w=>ctx.measureText(w).width));
+  ctx.fillStyle = hexA(accent, 0.9*p);
+  ctx.fillRect(-wMax*0.55, (wrapped.length-1)/2*lineH + lineH*0.28, wMax*1.1*easeOutQuint(p), big*0.34);
+  ctx.shadowColor = "rgba(0,0,0,.5)"; ctx.shadowBlur = big*0.3; ctx.shadowOffsetY = big*0.05;
+  ctx.fillStyle = txtCol;
+  wrapped.forEach((w,li)=> ctx.fillText(w, 0, (li - (wrapped.length-1)/2)*lineH));
+  ctx.restore();
+}
+
+const grainCv = document.createElement("canvas");
+const grainCx = grainCv.getContext("2d");
+let grainTick = 0;
+function addFilmLook(W,H){
+  const vg = ctx.createRadialGradient(W/2,H/2,H*0.32, W/2,H/2,H*0.78);
+  vg.addColorStop(0,"rgba(0,0,0,0)"); vg.addColorStop(1,"rgba(0,0,0,.4)");
+  ctx.fillStyle = vg; ctx.fillRect(0,0,W,H);
+
+  if(grainCv.width!==160){ grainCv.width=160; grainCv.height=284; }
+  grainTick++;
+  if(grainTick % 2 === 0){
+    const gw=grainCv.width, gh=grainCv.height;
+    const id = grainCx.createImageData(gw,gh);
+    for(let i=0;i<id.data.length;i+=4){
+      const v = 255*Math.random();
+      id.data[i]=id.data[i+1]=id.data[i+2]=v; id.data[i+3]=16;
+    }
+    grainCx.putImageData(id,0,0);
+  }
+  ctx.save();
+  ctx.globalAlpha = .5; ctx.globalCompositeOperation = "overlay";
+  ctx.drawImage(grainCv, 0,0,W,H);
+  ctx.restore();
+}
+function drawIdleCard(W,H,accent,fam){
+  const darkText = isLightColor(cBg.value);
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  ctx.fillStyle = accent; ctx.globalAlpha = 1;
+  ctx.font = `800 ${Math.round(W*0.06)}px "${fam}"`;
+  ctx.fillText("MAS MOTION", W/2, H/2 - W*0.05);
+  ctx.font = `400 ${Math.round(W*0.028)}px "Sora"`;
+  ctx.fillStyle = darkText ? "#241E3F" : "#FFFFFF"; ctx.globalAlpha = .6;
+  ctx.fillText("Your preview shows here", W/2, H/2 + W*0.02);
+  ctx.globalAlpha = 1;
+  const sh = Math.round(H*0.012), seg = W/currentStripe.length;
+  currentStripe.forEach((c,i)=>{ ctx.fillStyle=c; ctx.fillRect(i*seg, H-sh, seg+1, sh); });
+}
+function repaintIdle(){ if(!playing && !recording){ boundaries = media.length ? computeBoundaries() : [0]; renderFrame(0); } }
+
+/* ---------------- logo, watermark, year, outro ---------------- */
+function outroLen(){ return (endLogoOn.checked && logoImg) ? 1.2 : 0; }
+function filmstripLen(){ return (filmstripSegOn.checked && filmstripSet.arr.length) ? filmstripDuration() : 0; }
+function shuffleLen(){ return (shuffleSegOn.checked && shuffleSet.arr.length) ? shuffleDuration() : 0; }
+function bradyLen(){ return (bradySegOn.checked && bradySet.arr.length) ? bradyDuration() : 0; }
+function totalDuration(){ return +durRange.value + filmstripLen() + shuffleLen() + bradyLen() + outroLen(); }
+
+function drawOutroCard(lt, W, H){
+  ctx.fillStyle = cBg.value; ctx.fillRect(0,0,W,H);
+  const p = clamp01(lt/0.35);
+  const s = 0.85 + 0.15*easeOutBack(p);
+  ctx.save();
+  ctx.globalAlpha = p;
+  ctx.translate(W/2, H/2); ctx.scale(s,s);
+  if(logoImg){
+    const iw = logoImg.naturalWidth||1, ih = logoImg.naturalHeight||1;
+    const maxW = W*0.42, maxH = H*0.22;
+    const sc = Math.min(maxW/iw, maxH/ih);
+    ctx.drawImage(logoImg, -iw*sc/2, -ih*sc/2, iw*sc, ih*sc);
+  }
+  ctx.restore();
+  if(document.getElementById("stripeOn").checked){
+    const sh = Math.round(H*0.012), seg = W/currentStripe.length;
+    currentStripe.forEach((c,i)=>{ ctx.fillStyle = c; ctx.fillRect(i*seg, H-sh, seg+1, sh); });
+  }
+}
+
+function drawWatermarkYear(W,H){
+  const showWM = watermarkOn.checked && logoImg;
+  const showYear = yearOn.checked;
+  const pad = W*0.035;
+  ctx.save();
+  if(showWM){
+    const alpha = (+wmOpacity.value)/100;
+    const iw = logoImg.naturalWidth||1, ih = logoImg.naturalHeight||1;
+    const target = W*0.14;
+    const sc = target/Math.max(iw,ih);
+    const w = iw*sc, h = ih*sc;
+    const x = W-pad-w, y = H-pad-h;
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(logoImg, x, y, w, h);
+    ctx.globalAlpha = 1;
+  }
+  if(showYear){
+    ctx.font = `600 ${Math.round(W*0.026)}px "Sora"`;
+    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = "rgba(255,255,255,.9)";
+    ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 4;
+    ctx.fillText(yearSel.value, pad, H-pad);
+    ctx.shadowBlur = 0;
+  }
+  ctx.restore();
+  drawSectionWatermark(W, H, showYear);
+}
+function drawSectionWatermark(W, H, yearShown){
+  const name = sectionName.value.trim();
+  if(!sectionWatermarkOn.checked || !name) return;
+  const pad = W*0.035;
+  const lift = yearShown ? W*0.045 : 0;
+  ctx.save();
+  ctx.font = `600 ${Math.round(W*0.026)}px "Sora"`;
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "rgba(255,255,255,.9)";
+  ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 4;
+  ctx.fillText(name.toUpperCase(), pad, H-pad-lift);
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+/* ---------------- extra segment photo sets (film strip / shuffle / brady) ---------------- */
+function makePhotoSet(prefix, {cap=Infinity} = {}){
+  const arr = [];
+  const dropEl = document.getElementById(prefix+"Drop");
+  const inputEl = document.getElementById(prefix+"Input");
+  const thumbsEl = document.getElementById(prefix+"Thumbs");
+  dropEl.addEventListener("keydown", e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); inputEl.click(); } });
+  dropEl.addEventListener("dragover", e=>{e.preventDefault(); dropEl.classList.add("over");});
+  dropEl.addEventListener("dragleave", ()=>dropEl.classList.remove("over"));
+  dropEl.addEventListener("drop", e=>{e.preventDefault(); dropEl.classList.remove("over"); addPhotos(e.dataTransfer.files);});
+  inputEl.addEventListener("change", ()=>{ addPhotos(inputEl.files); inputEl.value=""; });
+
+  function addPhotos(list){
+    const files = [...list].filter(f=>f.type.startsWith("image/"));
+    if(!files.length) return;
+    let ignored = 0, queued = arr.length;
+    files.forEach(f=>{
+      if(queued >= cap){ ignored++; return; }
+      queued++;
+      const url = URL.createObjectURL(f);
+      const img = new Image();
+      img.onload = ()=>{ if(arr.length < cap) arr.push({el:img, url}); render(); repaintIdle(); };
+      img.onerror = ()=>{ statusEl.innerHTML = `Couldn't read image <b>${f.name}</b>.`; };
+      img.src = url;
+    });
+    if(ignored) statusEl.textContent = `Only ${cap} photos are used here; ${ignored} extra ignored.`;
+  }
+  function render(){
+    thumbsEl.innerHTML = "";
+    arr.forEach((m,i)=>{
+      const t = document.createElement("div"); t.className = "thumb";
+      t.innerHTML = `<img src="${m.url}" alt="photo ${i+1}">
+        <div class="tools">
+          <button title="Move earlier" data-a="up" data-i="${i}">←</button>
+          <button class="del" title="Remove" data-a="del" data-i="${i}">×</button>
+          <button title="Move later" data-a="dn" data-i="${i}">→</button>
+        </div>`;
+      thumbsEl.appendChild(t);
+    });
+    thumbsEl.querySelectorAll("button").forEach(b=>b.addEventListener("click", ()=>{
+      const i = +b.dataset.i, a = b.dataset.a;
+      if(a==="del") arr.splice(i,1);
+      if(a==="up" && i>0) [arr[i-1],arr[i]] = [arr[i],arr[i-1]];
+      if(a==="dn" && i<arr.length-1) [arr[i+1],arr[i]] = [arr[i],arr[i+1]];
+      render(); repaintIdle();
+    }));
+  }
+  return {arr, render};
+}
+const filmstripSet = makePhotoSet("filmstrip");
+const shuffleSet = makePhotoSet("shuffle");
+const bradySet = makePhotoSet("brady", {cap:8});
+
+const filmstripSegOn = document.getElementById("filmstripSegOn");
+const shuffleSegOn = document.getElementById("shuffleSegOn");
+const bradySegOn = document.getElementById("bradySegOn");
+function guardSegToggle(box, set, label){
+  box.addEventListener("change", ()=>{
+    if(box.checked && !set.arr.length){
+      box.checked = false;
+      statusEl.textContent = `Add at least one photo to the ${label} set first.`;
+      return;
+    }
+    repaintIdle();
+  });
+}
+guardSegToggle(filmstripSegOn, filmstripSet, "film strip");
+guardSegToggle(shuffleSegOn, shuffleSet, "fast shuffle");
+guardSegToggle(bradySegOn, bradySet, "Brady Bunch grid");
+
+/* ---------------- film strip reveal segment ---------------- */
+function filmstripDuration(){
+  const n = filmstripSet.arr.length;
+  return n ? Math.max(3, Math.min(8, 2 + n*1.1)) : 0;
+}
+function drawFilmStrip(lt, W, H){
+  ctx.fillStyle = "#0B0B0E"; ctx.fillRect(0,0,W,H);
+  const media2 = filmstripSet.arr, n = media2.length;
+  const dur = filmstripDuration();
+  const p = clamp01(lt/dur);
+  const frameH = H*0.5, bandY = (H-frameH)/2;
+  const frameW = frameH, gap = frameW*0.14;
+  const totalStripW = n*(frameW+gap);
+  const travel = totalStripW + W;
+  const x0 = W - travel*easeInOutQuart(p);
+
+  for(let i=0;i<n;i++){
+    const fx = x0 + i*(frameW+gap);
+    if(fx+frameW < -20 || fx > W+20) continue;
+    ctx.fillStyle = "#111";
+    ctx.fillRect(fx-6, bandY-6, frameW+12, frameH+12);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(fx, bandY, frameW, frameH); ctx.clip();
+    const el = media2[i].el;
+    const iw = el.naturalWidth||1, ih = el.naturalHeight||1;
+    const s = Math.max(frameW/iw, frameH/ih);
+    const dw = iw*s, dh = ih*s;
+    ctx.drawImage(el, fx+(frameW-dw)/2, bandY+(frameH-dh)/2, dw, dh);
+    ctx.restore();
+  }
+
+  const holeR = frameH*0.045, pitch = frameH*0.22;
+  const holeOffset = ((x0 % pitch) + pitch) % pitch;
+  ctx.fillStyle = "#F2EFE6";
+  for(let hx = holeOffset - pitch; hx < W+pitch; hx += pitch){
+    ctx.beginPath(); ctx.ellipse(hx, bandY - frameH*0.09, holeR, holeR*1.3, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(hx, bandY + frameH + frameH*0.09, holeR, holeR*1.3, 0, 0, Math.PI*2); ctx.fill();
+  }
+  addFilmLook(W,H);
+  drawWatermarkYear(W,H);
+}
+
+/* ---------------- fast shuffle segment ---------------- */
+function shuffleDuration(){
+  const n = shuffleSet.arr.length;
+  return n ? Math.max(1.6, Math.min(5, n*0.16)) : 0;
+}
+function drawShuffleSeg(lt, W, H){
+  ctx.fillStyle = "#000"; ctx.fillRect(0,0,W,H);
+  const media2 = shuffleSet.arr, n = media2.length;
+  const dur = shuffleDuration(), per = dur/n;
+  const idx = Math.min(n-1, Math.floor(lt/per));
+  const local = lt - idx*per;
+  const p = clamp01(local/per);
+  const el = media2[idx].el;
+  const rot = shuffleSeeds[idx] || 0;
+  const scale = 1.08 - 0.08*easeOutQuint(p);
+  ctx.save();
+  ctx.translate(W/2,H/2); ctx.rotate(rot); ctx.scale(scale,scale); ctx.translate(-W/2,-H/2);
+  coverDraw(el, W, H, 1.06, 0, 0, 1);
+  ctx.restore();
+  const flash = clamp01(1 - p/0.12) * 0.25;
+  if(flash > 0){ ctx.fillStyle = `rgba(255,255,255,${flash})`; ctx.fillRect(0,0,W,H); }
+  addFilmLook(W,H);
+  drawWatermarkYear(W,H);
+}
+
+/* ---------------- brady bunch grid segment ---------------- */
+function bradyDuration(){ return bradySet.arr.length ? 3.2 : 0; }
+function drawBradySeg(lt, W, H){
+  ctx.fillStyle = "#0B0B0E"; ctx.fillRect(0,0,W,H);
+  const media2 = bradySet.arr, n = Math.min(8, media2.length);
+  const cols = W>=H ? 4 : 2, rows = Math.ceil(8/cols);
+  const gap = W*0.012;
+  const cellW = (W-gap*(cols+1))/cols, cellH = (H-gap*(rows+1))/rows;
+  const stagger = 1.4/8*0.7;
+  for(let i=0;i<8;i++){
+    const col = i%cols, row = Math.floor(i/cols);
+    const x = gap + col*(cellW+gap), y = gap + row*(cellH+gap);
+    const p = clamp01((lt - i*stagger)/0.4);
+    if(p <= 0) continue;
+    const s = easeOutBack(p);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x,y,cellW,cellH); ctx.clip();
+    ctx.translate(x+cellW/2, y+cellH/2); ctx.scale(s,s); ctx.translate(-(x+cellW/2), -(y+cellH/2));
+    if(i < n){
+      const el = media2[i].el;
+      const iw = el.naturalWidth||1, ih = el.naturalHeight||1;
+      const sc = Math.max(cellW/iw, cellH/ih);
+      const dw = iw*sc, dh = ih*sc;
+      ctx.drawImage(el, x+(cellW-dw)/2, y+(cellH-dh)/2, dw, dh);
+    } else {
+      ctx.fillStyle = "#1A1A1F"; ctx.fillRect(x,y,cellW,cellH);
+    }
+    ctx.restore();
+    ctx.strokeStyle = "#0B0B0E"; ctx.lineWidth = gap; ctx.strokeRect(x,y,cellW,cellH);
+  }
+  addFilmLook(W,H);
+  drawWatermarkYear(W,H);
+}
+
+/* ---------------- preview & export ---------------- */
+const previewBtn = document.getElementById("previewBtn"), exportBtn = document.getElementById("exportBtn");
+function stopAllVideos(){
+  media.forEach(m=>{ if(m.kind==="vid") m.el.pause(); });
+  if(musicEl){ musicEl.pause(); musicEl.currentTime = 0; }
+}
+function runTimeline(onDone){
+  startTs = performance.now();
+  const dur = totalDuration();
+  function loop(now){
+    const t = (now - startTs)/1000;
+    if(t >= dur){ renderFrame(dur-0.001); progFill.style.width="100%"; onDone(); return; }
+    renderFrame(t);
+    progFill.style.width = (t/dur*100).toFixed(1)+"%";
+    rafId = requestAnimationFrame(loop);
+  }
+  rafId = requestAnimationFrame(loop);
+}
+
+previewBtn.addEventListener("click", async ()=>{
+  if(playing){ cancelAnimationFrame(rafId); playing=false; previewBtn.textContent="Preview"; stopAllVideos(); repaintIdle(); return; }
+  if(!media.length){ statusEl.textContent = "Add at least one photo or clip first."; return; }
+  await document.fonts.ready;
+  closeTrim(); buildRunPlan();
+  playing = true; previewBtn.textContent = "Stop";
+  if(musicEl){ musicEl.currentTime=musicStartSec(); musicEl.play().catch(()=>{}); }
+  statusEl.textContent = "Previewing…";
+  runTimeline(()=>{ playing=false; previewBtn.textContent="Preview"; stopAllVideos(); statusEl.textContent="Preview done. Shuffle picks fresh transitions each run, so preview again for a new mix."; });
+});
+
+exportBtn.addEventListener("click", async ()=>{
+  if(recording) return;
+  if(!media.length){ statusEl.textContent = "Add at least one photo or clip first."; return; }
+  await document.fonts.ready;
+  closeTrim(); buildRunPlan();
+  dlLink.style.display = "none";
+  recording = true; exportBtn.disabled = true; previewBtn.disabled = true;
+
+  const stream = cv.captureStream(30);
+  if(musicEl){
+    if(!sharedAudioCtx) sharedAudioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    if(sharedAudioCtx.state === "suspended") await sharedAudioCtx.resume();
+    if(!musicSrcNode){
+      musicSrcNode = sharedAudioCtx.createMediaElementSource(musicEl);
+      musicSrcNode.connect(sharedAudioCtx.destination);
+    }
+    const dest = sharedAudioCtx.createMediaStreamDestination();
+    musicSrcNode.connect(dest);
+    dest.stream.getAudioTracks().forEach(tr=>stream.addTrack(tr));
+    musicEl.currentTime = musicStartSec(); musicEl.play().catch(()=>{});
+  }
+
+  const types = ["video/mp4","video/webm;codecs=vp9","video/webm"];
+  const mime = types.find(t=>MediaRecorder.isTypeSupported(t)) || "";
+  const rec = new MediaRecorder(stream, mime?{mimeType:mime, videoBitsPerSecond: 8_000_000}:{});
+  const chunks = [];
+  rec.ondataavailable = e=>{ if(e.data.size) chunks.push(e.data); };
+  rec.onstop = ()=>{
+    const ext = mime.includes("mp4") ? "mp4" : "webm";
+    const blob = new Blob(chunks, {type: mime || "video/webm"});
+    dlLink.href = URL.createObjectURL(blob);
+    dlLink.download = "mas-motion-reel." + ext;
+    dlLink.style.display = "block";
+    statusEl.innerHTML = `Done! <b>${ext.toUpperCase()}</b> ready below, soundtrack included, clips muted.` +
+      (ext==="webm" ? " If a platform rejects WEBM, share it to CapCut or your gallery and it converts to MP4 on import." : "");
+    recording = false; exportBtn.disabled = false; previewBtn.disabled = false;
+    stopAllVideos();
+  };
+
+  statusEl.textContent = "Rendering in real time… keep this tab open.";
+  rec.start();
+  runTimeline(()=>rec.stop());
+});
+
+/* ---------------- init ---------------- */
+drawHeaderStripe();
+fillPresetSelect();
+applyTemplate("Girly Carnival");
+document.fonts.ready.then(repaintIdle);
+</script>
+</body>
+</html>
