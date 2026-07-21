@@ -497,7 +497,7 @@ function addFiles(list){
       el.onerror = ()=>{ statusEl.innerHTML = `Couldn't read image <b>${f.name}</b>.`; };
     } else if(isVid){
       const el = document.createElement("video");
-      el.muted = true; el.playsInline = true; el.preload = "metadata";
+      el.muted = true; el.playsInline = true; el.preload = "auto";
       let done = false;
       el.onloadedmetadata = ()=>{
         if(done) return; done = true;
@@ -939,10 +939,38 @@ function slideIndexAt(t){
 function syncVideo(m, offset){
   const v = m.el;
   const end = m.trim.start + m.trim.len;
-  if(v.paused){ try{ v.currentTime = m.trim.start + (offset % m.trim.len); v.play(); }catch(e){} }
-  else if(v.currentTime >= end - 0.06 || v.currentTime < m.trim.start - 0.2){
-    try{ v.currentTime = m.trim.start; }catch(e){}
+  if(v.paused){
+    try{ v.currentTime = m.trim.start + (offset % m.trim.len); v.play(); }catch(e){}
+    m._stallCt = v.currentTime; m._stallSince = performance.now();
+    return;
   }
+  if(v.currentTime >= end - 0.06 || v.currentTime < m.trim.start - 0.2){
+    try{ v.currentTime = m.trim.start; }catch(e){}
+    m._stallCt = m.trim.start; m._stallSince = performance.now();
+    return;
+  }
+  // Watchdog: some clips silently stall mid-playback (buffering hiccup) without ever
+  // reporting paused=true, which used to freeze the visible frame until the slide
+  // boundary moved on. If currentTime hasn't actually advanced for a beat, kick it.
+  const now = performance.now();
+  if(m._stallCt === undefined || Math.abs(v.currentTime - m._stallCt) > 0.01){
+    m._stallCt = v.currentTime; m._stallSince = now;
+  } else if(now - (m._stallSince || now) > 350){
+    try{ v.play(); v.currentTime = Math.min(end - 0.03, v.currentTime + 0.05); }catch(e){}
+    m._stallSince = now;
+  }
+}
+/* Pre-seek + pre-buffer every clip to its trim point before the run starts, so nothing
+   has to cold-buffer for the first time right as it's needed mid-timeline/transition. */
+async function primeVideos(){
+  const vids = media.filter(m=>m.kind==="vid");
+  await Promise.all(vids.map(async m=>{
+    try{
+      m.el.pause();
+      await seekTo(m.el, m.trim.start);
+      m._stallCt = m.el.currentTime; m._stallSince = performance.now();
+    }catch(e){}
+  }));
 }
 
 function renderFrame(t){
@@ -1228,22 +1256,38 @@ function drawSlam(text, lt, W, H, fontPx, fam, txtCol, accent){
 const grainCv = document.createElement("canvas");
 const grainCx = grainCv.getContext("2d");
 let grainTick = 0;
-function addFilmLook(W,H){
-  const vg = ctx.createRadialGradient(W/2,H/2,H*0.32, W/2,H/2,H*0.78);
-  vg.addColorStop(0,"rgba(0,0,0,0)"); vg.addColorStop(1,"rgba(0,0,0,.4)");
-  ctx.fillStyle = vg; ctx.fillRect(0,0,W,H);
-
-  if(grainCv.width!==160){ grainCv.width=160; grainCv.height=284; }
-  grainTick++;
-  if(grainTick % 2 === 0){
-    const gw=grainCv.width, gh=grainCv.height;
-    const id = grainCx.createImageData(gw,gh);
+/* Runs on every frame of every segment, so its cost adds up during real-time recording —
+   cache the vignette gradient and precompute a small pool of grain frames once instead of
+   re-allocating a gradient and running a per-pixel random() loop on every single frame. */
+let vignetteCache = null;
+function getVignette(W,H){
+  if(!vignetteCache || vignetteCache.w!==W || vignetteCache.h!==H){
+    const vg = ctx.createRadialGradient(W/2,H/2,H*0.32, W/2,H/2,H*0.78);
+    vg.addColorStop(0,"rgba(0,0,0,0)"); vg.addColorStop(1,"rgba(0,0,0,.4)");
+    vignetteCache = {w:W, h:H, grad:vg};
+  }
+  return vignetteCache.grad;
+}
+const GRAIN_FRAME_COUNT = 6;
+let grainFrames = null;
+function buildGrainFrames(){
+  grainCv.width = 160; grainCv.height = 284;
+  grainFrames = [];
+  for(let f=0; f<GRAIN_FRAME_COUNT; f++){
+    const id = grainCx.createImageData(160,284);
     for(let i=0;i<id.data.length;i+=4){
       const v = 255*Math.random();
       id.data[i]=id.data[i+1]=id.data[i+2]=v; id.data[i+3]=16;
     }
-    grainCx.putImageData(id,0,0);
+    grainFrames.push(id);
   }
+}
+function addFilmLook(W,H){
+  ctx.fillStyle = getVignette(W,H); ctx.fillRect(0,0,W,H);
+
+  if(!grainFrames) buildGrainFrames();
+  grainTick++;
+  if(grainTick % 2 === 0) grainCx.putImageData(grainFrames[Math.floor(grainTick/2) % GRAIN_FRAME_COUNT], 0, 0);
   ctx.save();
   ctx.globalAlpha = .5; ctx.globalCompositeOperation = "overlay";
   ctx.drawImage(grainCv, 0,0,W,H);
@@ -1587,6 +1631,8 @@ previewBtn.addEventListener("click", async ()=>{
   if(!media.length){ statusEl.textContent = "Add at least one photo or clip first."; return; }
   await document.fonts.ready;
   closeTrim(); buildRunPlan();
+  statusEl.textContent = "Getting clips ready…";
+  await primeVideos();
   playing = true; previewBtn.textContent = "Stop";
   if(musicEl){ musicEl.currentTime=musicStartSec(); musicEl.play().catch(()=>{}); }
   statusEl.textContent = "Previewing…";
@@ -1600,6 +1646,8 @@ exportBtn.addEventListener("click", async ()=>{
   closeTrim(); buildRunPlan();
   dlLink.style.display = "none";
   recording = true; exportBtn.disabled = true; previewBtn.disabled = true;
+  statusEl.textContent = "Getting clips ready…";
+  await primeVideos();
 
   const stream = cv.captureStream(30);
   if(musicEl){
@@ -1712,7 +1760,7 @@ async function loadProject(name){
     } else {
       await new Promise(res=>{
         const el=document.createElement("video");
-        el.muted=true; el.playsInline=true; el.preload="metadata";
+        el.muted=true; el.playsInline=true; el.preload="auto";
         el.onloadedmetadata=()=>{ media.push({kind:"vid", el, url, dur:m.dur, trim:m.trim}); res(); };
         el.src=url;
       });
