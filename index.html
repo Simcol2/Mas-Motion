@@ -318,6 +318,13 @@
         <input type="range" id="wmOpacity" min="20" max="90" value="55" step="5">
       </div>
 
+      <label for="stickerSel">Top-left sticker</label>
+      <select id="stickerSel">
+        <option value="">— none —</option>
+        <option value="Road Recap 2026">Road Recap 2026</option>
+        <option value="Soca Season 2026">Soca Season 2026</option>
+      </select>
+
       <label for="sectionName">Section name</label>
       <input type="text" id="sectionName" maxlength="40" placeholder="e.g. Fancy Sailors">
       <div class="check">
@@ -490,7 +497,7 @@ function addFiles(list){
       el.onerror = ()=>{ statusEl.innerHTML = `Couldn't read image <b>${f.name}</b>.`; };
     } else if(isVid){
       const el = document.createElement("video");
-      el.muted = true; el.playsInline = true; el.preload = "metadata";
+      el.muted = true; el.playsInline = true; el.preload = "auto";
       let done = false;
       el.onloadedmetadata = ()=>{
         if(done) return; done = true;
@@ -769,6 +776,8 @@ const logoPreviewWrap = document.getElementById("logoPreviewWrap"), logoPreview 
 const watermarkOn = document.getElementById("watermarkOn"), watermarkOpts = document.getElementById("watermarkOpts");
 const wmOpacity = document.getElementById("wmOpacity");
 const sectionName = document.getElementById("sectionName"), sectionWatermarkOn = document.getElementById("sectionWatermarkOn");
+const stickerSel = document.getElementById("stickerSel");
+stickerSel.addEventListener("change", repaintIdle);
 const yearOn = document.getElementById("yearOn"), yearOpts = document.getElementById("yearOpts"), yearSel = document.getElementById("yearSel");
 const endLogoOn = document.getElementById("endLogoOn"), endLogoHint = document.getElementById("endLogoHint");
 
@@ -930,10 +939,25 @@ function slideIndexAt(t){
 function syncVideo(m, offset){
   const v = m.el;
   const end = m.trim.start + m.trim.len;
-  if(v.paused){ try{ v.currentTime = m.trim.start + (offset % m.trim.len); v.play(); }catch(e){} }
-  else if(v.currentTime >= end - 0.06 || v.currentTime < m.trim.start - 0.2){
+  if(v.paused){
+    try{ v.currentTime = m.trim.start + (offset % m.trim.len); v.play(); }catch(e){}
+    return;
+  }
+  if(v.currentTime >= end - 0.06 || v.currentTime < m.trim.start - 0.2){
     try{ v.currentTime = m.trim.start; }catch(e){}
   }
+}
+/* Pre-seek + pre-buffer every clip to its trim point before the run starts, so nothing
+   has to cold-buffer for the first time right as it's needed mid-timeline/transition.
+   Each seek is capped so a clip that never fires "seeked" can't stall the whole export. */
+async function primeVideos(){
+  const vids = media.filter(m=>m.kind==="vid");
+  await Promise.all(vids.map(async m=>{
+    try{
+      m.el.pause();
+      await Promise.race([seekTo(m.el, m.trim.start), new Promise(res=>setTimeout(res, 3000))]);
+    }catch(e){}
+  }));
 }
 
 function renderFrame(t){
@@ -1093,6 +1117,7 @@ function renderMainFrame(t, W, H){
   }
   addFilmLook(W,H);
   drawWatermarkYear(W,H);
+  drawSticker(W,H);
 }
 
 /* ---------------- kinetic text ---------------- */
@@ -1218,22 +1243,38 @@ function drawSlam(text, lt, W, H, fontPx, fam, txtCol, accent){
 const grainCv = document.createElement("canvas");
 const grainCx = grainCv.getContext("2d");
 let grainTick = 0;
-function addFilmLook(W,H){
-  const vg = ctx.createRadialGradient(W/2,H/2,H*0.32, W/2,H/2,H*0.78);
-  vg.addColorStop(0,"rgba(0,0,0,0)"); vg.addColorStop(1,"rgba(0,0,0,.4)");
-  ctx.fillStyle = vg; ctx.fillRect(0,0,W,H);
-
-  if(grainCv.width!==160){ grainCv.width=160; grainCv.height=284; }
-  grainTick++;
-  if(grainTick % 2 === 0){
-    const gw=grainCv.width, gh=grainCv.height;
-    const id = grainCx.createImageData(gw,gh);
+/* Runs on every frame of every segment, so its cost adds up during real-time recording —
+   cache the vignette gradient and precompute a small pool of grain frames once instead of
+   re-allocating a gradient and running a per-pixel random() loop on every single frame. */
+let vignetteCache = null;
+function getVignette(W,H){
+  if(!vignetteCache || vignetteCache.w!==W || vignetteCache.h!==H){
+    const vg = ctx.createRadialGradient(W/2,H/2,H*0.32, W/2,H/2,H*0.78);
+    vg.addColorStop(0,"rgba(0,0,0,0)"); vg.addColorStop(1,"rgba(0,0,0,.4)");
+    vignetteCache = {w:W, h:H, grad:vg};
+  }
+  return vignetteCache.grad;
+}
+const GRAIN_FRAME_COUNT = 6;
+let grainFrames = null;
+function buildGrainFrames(){
+  grainCv.width = 160; grainCv.height = 284;
+  grainFrames = [];
+  for(let f=0; f<GRAIN_FRAME_COUNT; f++){
+    const id = grainCx.createImageData(160,284);
     for(let i=0;i<id.data.length;i+=4){
       const v = 255*Math.random();
       id.data[i]=id.data[i+1]=id.data[i+2]=v; id.data[i+3]=16;
     }
-    grainCx.putImageData(id,0,0);
+    grainFrames.push(id);
   }
+}
+function addFilmLook(W,H){
+  ctx.fillStyle = getVignette(W,H); ctx.fillRect(0,0,W,H);
+
+  if(!grainFrames) buildGrainFrames();
+  grainTick++;
+  if(grainTick % 2 === 0) grainCx.putImageData(grainFrames[Math.floor(grainTick/2) % GRAIN_FRAME_COUNT], 0, 0);
   ctx.save();
   ctx.globalAlpha = .5; ctx.globalCompositeOperation = "overlay";
   ctx.drawImage(grainCv, 0,0,W,H);
@@ -1281,12 +1322,43 @@ function drawOutroCard(lt, W, H){
   }
 }
 
+/* pill-style badge, matches the drawBoxText kinetic-text look used across the video.
+   (x,y) is the box's top-left corner; returns the box height so callers can stack badges. */
+function drawBadge(text, x, y, W, fontScale){
+  const accent = cAccent.value;
+  ctx.save();
+  const fontPx = Math.round(W*fontScale);
+  ctx.font = fontStr(fontPx, "Unbounded");
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  const label = String(text).toUpperCase();
+  const tw = ctx.measureText(label).width;
+  const boxPad = fontPx*0.55, boxH = fontPx*1.9;
+  ctx.shadowColor = "rgba(0,0,0,.35)"; ctx.shadowBlur = fontPx*0.4; ctx.shadowOffsetY = fontPx*0.08;
+  ctx.fillStyle = accent;
+  roundRect(x, y, tw+boxPad*2, boxH, boxH*0.3);
+  ctx.fill();
+  ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  ctx.fillStyle = isLightColor(accent) ? "#241E3F" : "#FFFFFF";
+  ctx.fillText(label, x+boxPad, y+boxH/2 + fontPx*0.02);
+  ctx.restore();
+  return boxH;
+}
+function drawSticker(W,H){
+  const text = stickerSel.value;
+  if(!text) return;
+  const pad = W*0.035;
+  ctx.save();
+  ctx.translate(pad, pad);
+  ctx.rotate(-0.035);
+  drawBadge(text, 0, 0, W, 0.032);
+  ctx.restore();
+}
 function drawWatermarkYear(W,H){
   const showWM = watermarkOn.checked && logoImg;
   const showYear = yearOn.checked;
   const pad = W*0.035;
-  ctx.save();
   if(showWM){
+    ctx.save();
     const alpha = (+wmOpacity.value)/100;
     const iw = logoImg.naturalWidth||1, ih = logoImg.naturalHeight||1;
     const target = W*0.14;
@@ -1296,32 +1368,22 @@ function drawWatermarkYear(W,H){
     ctx.globalAlpha = alpha;
     ctx.drawImage(logoImg, x, y, w, h);
     ctx.globalAlpha = 1;
+    ctx.restore();
   }
-  if(showYear){
-    ctx.font = `600 ${Math.round(W*0.026)}px "Sora"`;
-    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
-    ctx.fillStyle = "rgba(255,255,255,.9)";
-    ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 4;
-    ctx.fillText(yearSel.value, pad, H-pad);
-    ctx.shadowBlur = 0;
-  }
-  ctx.restore();
-  drawSectionWatermark(W, H, showYear);
-}
-function drawSectionWatermark(W, H, yearShown){
   const name = sectionName.value.trim();
-  if(!sectionWatermarkOn.checked || !name) return;
-  const pad = W*0.035;
-  const lift = yearShown ? W*0.045 : 0;
-  ctx.save();
-  ctx.font = `600 ${Math.round(W*0.026)}px "Sora"`;
-  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
-  ctx.fillStyle = "rgba(255,255,255,.9)";
-  ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 4;
-  ctx.fillText(name.toUpperCase(), pad, H-pad-lift);
-  ctx.shadowBlur = 0;
-  ctx.restore();
+  const showSection = sectionWatermarkOn.checked && !!name;
+  const gap = W*0.014;
+  let bottom = H - pad;
+  if(showYear){
+    const h = drawBadge(yearSel.value, pad, bottom - drawBadgeHeight(W,0.026), W, 0.026);
+    bottom -= h + gap;
+  }
+  if(showSection){
+    const h = drawBadge(name, pad, bottom - drawBadgeHeight(W,0.026), W, 0.026);
+    bottom -= h + gap;
+  }
 }
+function drawBadgeHeight(W, fontScale){ return Math.round(W*fontScale)*1.9; }
 
 /* ---------------- extra segment photo sets (film strip / shuffle / brady) ---------------- */
 function makePhotoSet(prefix, {cap=Infinity} = {}){
@@ -1394,11 +1456,13 @@ guardSegToggle(shuffleSegOn, shuffleSet, "fast shuffle");
 guardSegToggle(bradySegOn, bradySet, "Brady Bunch grid");
 
 /* ---------------- film strip reveal segment ---------------- */
+/* Each photo gets a fast directional whip-through (with motion blur) that decelerates
+   into a landed frame, then holds with a slow creeping zoom so it's never fully static. */
 function filmstripDuration(){
   const n = filmstripSet.arr.length;
   if(!n) return 0;
-  const per = 0.65;
-  return Math.max(1.3, Math.min(9, n*per));
+  const per = 1.1;
+  return Math.max(2.2, Math.min(11, n*per));
 }
 function drawFilmStrip(lt, W, H){
   ctx.fillStyle = "#0B0B0E"; ctx.fillRect(0,0,W,H);
@@ -1406,19 +1470,25 @@ function drawFilmStrip(lt, W, H){
   const dur = filmstripDuration(), per = dur/n;
   const idx = Math.min(n-1, Math.floor(lt/per));
   const local = lt - idx*per;
-  const snapDur = Math.min(0.14, per*0.4);
+  const rushDur = Math.min(0.55, per*0.6);
 
   const margin = W*0.11;
   const frameW = W - margin*2;
   const frameH = Math.min(H*0.82, frameW*1.28);
   const cx = W/2, cy = H/2;
   const dir = idx%2===0 ? 1 : -1;
-  let scrollOffset = 0, blurPx = 0;
-  if(local < snapDur){
-    const p = 1 - local/snapDur;
-    scrollOffset = dir * H * 0.85 * p * p;
-    blurPx = 16 * p;
+
+  let scrollOffset = 0, blurPx = 0, rushZoom = 0;
+  if(local < rushDur){
+    const rp = 1 - local/rushDur;              // 1 -> 0 as it speeds in and lands
+    const e = easeOutQuint(1-rp);               // fast start, decelerating landing
+    scrollOffset = dir * H * 0.95 * (1-e);
+    blurPx = 24 * (1-e);
+    rushZoom = 0.35 * (1-e);
   }
+  const holdP = clamp01((local - rushDur) / Math.max(0.001, per - rushDur));
+  const creepZoom = 0.06 * holdP;               // slow Ken-Burns creep while landed, never dead-static
+
   const fx = cx - frameW/2, fy = cy - frameH/2 + scrollOffset;
 
   ctx.save();
@@ -1428,11 +1498,25 @@ function drawFilmStrip(lt, W, H){
   ctx.beginPath(); ctx.rect(fx, fy, frameW, frameH); ctx.clip();
   const el = arr[idx].el;
   const iw = el.naturalWidth||1, ih = el.naturalHeight||1;
-  const s = Math.max(frameW/iw, frameH/ih);
+  const s = Math.max(frameW/iw, frameH/ih) * (1 + rushZoom + creepZoom);
   const dw = iw*s, dh = ih*s;
   ctx.drawImage(el, fx+(frameW-dw)/2, fy+(frameH-dh)/2, dw, dh);
   ctx.restore();
   ctx.restore();
+
+  if(blurPx > 1.5){
+    ctx.save();
+    ctx.globalAlpha = clamp01(blurPx/24) * 0.4;
+    ctx.globalCompositeOperation = "screen";
+    const streakGrad = dir>0
+      ? ctx.createLinearGradient(0, fy-H*0.4, 0, fy)
+      : ctx.createLinearGradient(0, fy+frameH, 0, fy+frameH+H*0.4);
+    streakGrad.addColorStop(0, "rgba(255,255,255,0)");
+    streakGrad.addColorStop(1, "rgba(255,255,255,.6)");
+    ctx.fillStyle = streakGrad;
+    ctx.fillRect(fx-8, dir>0 ? fy-H*0.4 : fy+frameH, frameW+16, H*0.4);
+    ctx.restore();
+  }
 
   const holeR = W*0.017, pitch = holeR*3.6;
   ctx.fillStyle = "#F2EFE6";
@@ -1442,6 +1526,7 @@ function drawFilmStrip(lt, W, H){
   }
   addFilmLook(W,H);
   drawWatermarkYear(W,H);
+  drawSticker(W,H);
 }
 
 /* ---------------- fast shuffle segment ---------------- */
@@ -1467,21 +1552,26 @@ function drawShuffleSeg(lt, W, H){
   if(flash > 0){ ctx.fillStyle = `rgba(255,255,255,${flash})`; ctx.fillRect(0,0,W,H); }
   addFilmLook(W,H);
   drawWatermarkYear(W,H);
+  drawSticker(W,H);
 }
 
 /* ---------------- brady bunch grid segment ---------------- */
-function bradyDuration(){ return bradySet.arr.length ? 6 : 0; }
+/* Pop-in finishes around ~1.3s; a fixed hold on top of that (not a fixed total duration)
+   keeps the grid from sitting frozen on screen for several extra seconds. */
+const BRADY_STAGGER = 0.11, BRADY_POP = 0.4, BRADY_HOLD = 1.1;
+function bradyDuration(){
+  return bradySet.arr.length ? (7*BRADY_STAGGER + BRADY_POP + BRADY_HOLD) : 0;
+}
 function drawBradySeg(lt, W, H){
   ctx.fillStyle = "#0B0B0E"; ctx.fillRect(0,0,W,H);
   const media2 = bradySet.arr, n = Math.min(8, media2.length);
   const cols = W>=H ? 4 : 2, rows = Math.ceil(8/cols);
   const gap = W*0.012;
   const cellW = (W-gap*(cols+1))/cols, cellH = (H-gap*(rows+1))/rows;
-  const stagger = 1.4/8*0.7;
   for(let i=0;i<8;i++){
     const col = i%cols, row = Math.floor(i/cols);
     const x = gap + col*(cellW+gap), y = gap + row*(cellH+gap);
-    const p = clamp01((lt - i*stagger)/0.4);
+    const p = clamp01((lt - i*BRADY_STAGGER)/BRADY_POP);
     if(p <= 0) continue;
     const s = easeOutBack(p);
     ctx.save();
@@ -1501,6 +1591,7 @@ function drawBradySeg(lt, W, H){
   }
   addFilmLook(W,H);
   drawWatermarkYear(W,H);
+  drawSticker(W,H);
 }
 
 /* ---------------- preview & export ---------------- */
@@ -1527,6 +1618,8 @@ previewBtn.addEventListener("click", async ()=>{
   if(!media.length){ statusEl.textContent = "Add at least one photo or clip first."; return; }
   await document.fonts.ready;
   closeTrim(); buildRunPlan();
+  statusEl.textContent = "Getting clips ready…";
+  await primeVideos();
   playing = true; previewBtn.textContent = "Stop";
   if(musicEl){ musicEl.currentTime=musicStartSec(); musicEl.play().catch(()=>{}); }
   statusEl.textContent = "Previewing…";
@@ -1540,6 +1633,8 @@ exportBtn.addEventListener("click", async ()=>{
   closeTrim(); buildRunPlan();
   dlLink.style.display = "none";
   recording = true; exportBtn.disabled = true; previewBtn.disabled = true;
+  statusEl.textContent = "Getting clips ready…";
+  await primeVideos();
 
   const stream = cv.captureStream(30);
   if(musicEl){
@@ -1557,7 +1652,7 @@ exportBtn.addEventListener("click", async ()=>{
 
   const types = ["video/mp4","video/webm;codecs=vp9","video/webm"];
   const mime = types.find(t=>MediaRecorder.isTypeSupported(t)) || "";
-  const rec = new MediaRecorder(stream, mime?{mimeType:mime, videoBitsPerSecond: 8_000_000}:{});
+  const rec = new MediaRecorder(stream, mime?{mimeType:mime, videoBitsPerSecond: 20_000_000, audioBitsPerSecond: 192_000}:{});
   const chunks = [];
   rec.ondataavailable = e=>{ if(e.data.size) chunks.push(e.data); };
   rec.onstop = ()=>{
@@ -1617,6 +1712,7 @@ async function saveProject(name){
       watermarkOn:watermarkOn.checked, wmOpacity:+wmOpacity.value,
       sectionName:sectionName.value, sectionWatermarkOn:sectionWatermarkOn.checked,
       yearOn:yearOn.checked, yearSel:yearSel.value, endLogoOn:endLogoOn.checked,
+      stickerSel:stickerSel.value,
       filmstripSegOn:filmstripSegOn.checked, shuffleSegOn:shuffleSegOn.checked, bradySegOn:bradySegOn.checked,
       musicStart:musicStartSec()
     },
@@ -1651,7 +1747,7 @@ async function loadProject(name){
     } else {
       await new Promise(res=>{
         const el=document.createElement("video");
-        el.muted=true; el.playsInline=true; el.preload="metadata";
+        el.muted=true; el.playsInline=true; el.preload="auto";
         el.onloadedmetadata=()=>{ media.push({kind:"vid", el, url, dur:m.dur, trim:m.trim}); res(); };
         el.src=url;
       });
@@ -1677,6 +1773,7 @@ async function loadProject(name){
   sectionName.value = s.sectionName; sectionWatermarkOn.checked = s.sectionWatermarkOn;
   yearOn.checked = s.yearOn; yearOpts.style.display = s.yearOn ? "block" : "none"; yearSel.value = s.yearSel;
   endLogoOn.checked = s.endLogoOn; endLogoHint.style.display = s.endLogoOn ? "block" : "none";
+  stickerSel.value = s.stickerSel || "";
   filmstripSegOn.checked = s.filmstripSegOn; shuffleSegOn.checked = s.shuffleSegOn; bradySegOn.checked = s.bradySegOn;
 
   if(project.logoBlob){
