@@ -45,6 +45,9 @@
   .controls .panel:nth-of-type(4){border-top-color:var(--yellow);}
   .controls .panel:nth-of-type(5){border-top-color:var(--aqua);}
   .controls .panel:nth-of-type(6){border-top-color:var(--red);}
+  .controls .panel:nth-of-type(7){border-top-color:var(--pink);}
+  .controls .panel:nth-of-type(8){border-top-color:var(--blue);}
+  .controls .panel:nth-of-type(9){border-top-color:var(--teal);}
   .panel h2{
     font-family:'Unbounded',sans-serif; font-size:12px; font-weight:600;
     text-transform:uppercase; letter-spacing:.14em; margin-bottom:12px; color:var(--pink);
@@ -54,6 +57,9 @@
   .controls .panel:nth-of-type(4) h2{color:var(--yellow-deep);}
   .controls .panel:nth-of-type(5) h2{color:#1FB8AA;}
   .controls .panel:nth-of-type(6) h2{color:var(--red);}
+  .controls .panel:nth-of-type(7) h2{color:var(--pink);}
+  .controls .panel:nth-of-type(8) h2{color:var(--blue);}
+  .controls .panel:nth-of-type(9) h2{color:#1FB8AA;}
   label{display:block; font-size:12px; color:var(--muted); margin:10px 0 4px;}
   input[type=text], select, input[type=number]{
     width:100%; background:#fff; border:1.5px solid var(--line); color:var(--ink);
@@ -217,6 +223,8 @@
         <option value="whip">Whip Pan</option>
         <option value="spin">Spin Zoom</option>
         <option value="glitch">Glitch Cut</option>
+        <option value="swirl">Photo Swirl In</option>
+        <option value="bounce">Bounce In</option>
         <option value="shuffle" selected>Shuffle — different every render</option>
       </select>
       <div class="row3" style="margin-top:10px">
@@ -241,6 +249,8 @@
       <label for="musicInput">Soundtrack (clips are always muted, only this plays)</label>
       <input type="file" id="musicInput" accept="audio/*" style="color:var(--muted); font-size:13px;">
       <p class="music-status" id="musicStatus"></p>
+      <label for="musicStartRange">Music starts at: <b id="musicStartLabel">0s</b></label>
+      <input type="range" id="musicStartRange" min="0" max="0" step="1" value="0" disabled>
       <div class="check">
         <input type="checkbox" id="beatSync" checked>
         <label for="beatSync" style="margin:0">Cut slides to the beat</label>
@@ -277,23 +287,23 @@
 
       <div class="check">
         <input type="checkbox" id="watermarkOn">
-        <label for="watermarkOn" style="margin:0">Watermark video with logo</label>
+        <label for="watermarkOn" style="margin:0">Watermark video with logo (bottom right)</label>
       </div>
       <div id="watermarkOpts" style="display:none;">
-        <label for="wmCorner">Logo position</label>
-        <select id="wmCorner">
-          <option value="tr">Top right</option>
-          <option value="tl">Top left</option>
-          <option value="br" selected>Bottom right</option>
-          <option value="bl">Bottom left</option>
-        </select>
         <label for="wmOpacity">Watermark strength</label>
         <input type="range" id="wmOpacity" min="20" max="90" value="55" step="5">
       </div>
 
+      <label for="sectionName">Section name</label>
+      <input type="text" id="sectionName" maxlength="40" placeholder="e.g. Fancy Sailors">
+      <div class="check">
+        <input type="checkbox" id="sectionWatermarkOn">
+        <label for="sectionWatermarkOn" style="margin:0">Watermark video with section name (bottom left)</label>
+      </div>
+
       <div class="check">
         <input type="checkbox" id="yearOn">
-        <label for="yearOn" style="margin:0">Show year in the corner</label>
+        <label for="yearOn" style="margin:0">Show year (bottom left)</label>
       </div>
       <div id="yearOpts" style="display:none;">
         <label for="yearSel">Year</label>
@@ -305,6 +315,48 @@
         <label for="endLogoOn" style="margin:0">End the video on your logo</label>
       </div>
       <p class="hint" id="endLogoHint" style="display:none; margin-top:4px;">Adds a short logo card to the end of your reel.</p>
+    </section>
+
+    <section class="panel">
+      <h2>7 · Film Strip Reveal</h2>
+      <p class="hint" style="margin:0 0 10px">Its own photo set — plays like an old film strip scrolling past, sprocket holes and all. Works great with just one or two photos. Not part of the main template, its own segment at the end.</p>
+      <label class="drop" id="filmstripDrop" for="filmstripInput" tabindex="0" role="button" aria-label="Add photos for the film strip">
+        Tap to add photos for the film strip<br><small>Great with just 1–2 photos, or more.</small>
+      </label>
+      <input type="file" id="filmstripInput" class="sr" accept="image/*" multiple>
+      <div class="thumbs" id="filmstripThumbs"></div>
+      <div class="check">
+        <input type="checkbox" id="filmstripSegOn">
+        <label for="filmstripSegOn" style="margin:0">Include film strip segment in video</label>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>8 · Fast Shuffle Animation</h2>
+      <p class="hint" style="margin:0 0 10px">Its own photo set — flashes on top of each other fast, like a deck of cards being shuffled. Added as its own segment at the end.</p>
+      <label class="drop" id="shuffleDrop" for="shuffleInput" tabindex="0" role="button" aria-label="Add photos for fast shuffle">
+        Tap to add photos for fast shuffle<br><small>Works best with 6–20 photos.</small>
+      </label>
+      <input type="file" id="shuffleInput" class="sr" accept="image/*" multiple>
+      <div class="thumbs" id="shuffleThumbs"></div>
+      <div class="check">
+        <input type="checkbox" id="shuffleSegOn">
+        <label for="shuffleSegOn" style="margin:0">Include fast shuffle segment in video</label>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>9 · Brady Bunch Grid</h2>
+      <p class="hint" style="margin:0 0 10px">Pick exactly 8 photos to appear together in a classic 8-box grid reveal, its own segment at the end.</p>
+      <label class="drop" id="bradyDrop" for="bradyInput" tabindex="0" role="button" aria-label="Add up to 8 photos for the grid">
+        Tap to add up to 8 photos<br><small>Extra photos beyond 8 are ignored.</small>
+      </label>
+      <input type="file" id="bradyInput" class="sr" accept="image/*" multiple>
+      <div class="thumbs" id="bradyThumbs"></div>
+      <div class="check">
+        <input type="checkbox" id="bradySegOn">
+        <label for="bradySegOn" style="margin:0">Include Brady Bunch grid segment in video</label>
+      </div>
     </section>
 
     <div class="btnrow">
@@ -578,17 +630,30 @@ document.getElementById("savePreset").addEventListener("click", ()=>{
 });
 
 /* ---------------- music + beat detection ---------------- */
+const musicStartRange = document.getElementById("musicStartRange"), musicStartLabel = document.getElementById("musicStartLabel");
+function musicStartSec(){ return +musicStartRange.value || 0; }
+function activeBeats(){
+  const off = musicStartSec();
+  if(!off) return beats;
+  return beats.filter(b=>b>=off).map(b=>b-off);
+}
+musicStartRange.addEventListener("input", ()=>{ musicStartLabel.textContent = Math.round(+musicStartRange.value)+"s"; repaintIdle(); });
+
 document.getElementById("musicInput").addEventListener("change", async e=>{
   const f = e.target.files[0]; if(!f) return;
   if(musicEl){ musicEl.pause(); }
   musicEl = new Audio(URL.createObjectURL(f)); musicEl.preload = "auto";
   musicSrcNode = null; beats = [];
+  musicStartRange.value = 0; musicStartRange.disabled = true; musicStartRange.max = 0;
+  musicStartLabel.textContent = "0s";
   musicStatus.textContent = "Listening for the beat…";
   try{
     const buf = await f.arrayBuffer();
     if(!sharedAudioCtx) sharedAudioCtx = new (window.AudioContext||window.webkitAudioContext)();
     const audio = await sharedAudioCtx.decodeAudioData(buf.slice(0));
     beats = detectBeats(audio);
+    musicStartRange.max = Math.max(0, Math.floor(audio.duration - 1));
+    musicStartRange.disabled = false;
     musicStatus.textContent = beats.length
       ? `♪ Found ${beats.length} beats. Slides will land on them.`
       : "♪ Loaded. Couldn't find a clear beat, slides will space evenly.";
@@ -623,10 +688,11 @@ function computeBoundaries(){
   const b = [0];
   for(let i=1; i<n; i++){
     let target = dur * i/n;
-    if(beatSyncBox.checked && beats.length){
+    const abeats = activeBeats();
+    if(beatSyncBox.checked && abeats.length){
       let bestBeat = null, bestDist = Infinity;
       const tol = (dur/n) * 0.45;
-      beats.forEach(bt=>{
+      abeats.forEach(bt=>{
         const d = Math.abs(bt - target);
         if(d < bestDist && d < tol && bt < dur){ bestDist = d; bestBeat = bt; }
       });
@@ -644,7 +710,8 @@ let logoImg = null;
 const logoDrop = document.getElementById("logoDrop"), logoInput = document.getElementById("logoInput");
 const logoPreviewWrap = document.getElementById("logoPreviewWrap"), logoPreview = document.getElementById("logoPreview");
 const watermarkOn = document.getElementById("watermarkOn"), watermarkOpts = document.getElementById("watermarkOpts");
-const wmCorner = document.getElementById("wmCorner"), wmOpacity = document.getElementById("wmOpacity");
+const wmOpacity = document.getElementById("wmOpacity");
+const sectionName = document.getElementById("sectionName"), sectionWatermarkOn = document.getElementById("sectionWatermarkOn");
 const yearOn = document.getElementById("yearOn"), yearOpts = document.getElementById("yearOpts"), yearSel = document.getElementById("yearSel");
 const endLogoOn = document.getElementById("endLogoOn"), endLogoHint = document.getElementById("endLogoHint");
 
@@ -685,7 +752,9 @@ watermarkOn.addEventListener("change", ()=>{
   watermarkOpts.style.display = watermarkOn.checked ? "block" : "none";
   repaintIdle();
 });
-[wmCorner, wmOpacity].forEach(el=>el.addEventListener("input", repaintIdle));
+wmOpacity.addEventListener("input", repaintIdle);
+sectionName.addEventListener("input", repaintIdle);
+sectionWatermarkOn.addEventListener("change", repaintIdle);
 yearOn.addEventListener("change", ()=>{ yearOpts.style.display = yearOn.checked ? "block" : "none"; repaintIdle(); });
 yearSel.addEventListener("change", repaintIdle);
 endLogoOn.addEventListener("change", ()=>{
@@ -699,8 +768,9 @@ endLogoOn.addEventListener("change", ()=>{
 });
 
 /* ---------------- motion styles ---------------- */
-const TRANSITIONS = ["punch","whip","spin","glitch"];
+const TRANSITIONS = ["punch","whip","spin","glitch","swirl","bounce"];
 const TEXT_ANIMS = ["wordpop","box","slam"];
+let shuffleSeeds = [];
 function buildRunPlan(){
   boundaries = computeBoundaries();
   const style = motionSel.value;
@@ -713,6 +783,7 @@ function buildRunPlan(){
   lineAnims = lines.map(()=> style==="shuffle"
     ? TEXT_ANIMS[Math.floor(Math.random()*TEXT_ANIMS.length)]
     : (style==="whip" ? "wordpop" : style==="spin" ? "box" : "slam"));
+  shuffleSeeds = shuffleSet.arr.map(()=> (Math.random()-0.5)*0.16);
 }
 
 /* ---------------- drawing ---------------- */
@@ -747,6 +818,13 @@ const easeOutBack  = p => { const c1=1.70158, c3=c1+1; return 1 + c3*Math.pow(p-
 const easeOutQuint = p => 1 - Math.pow(1-p,5);
 const easeInOutQuart = p => p<0.5 ? 8*p*p*p*p : 1 - Math.pow(-2*p+2,4)/2;
 const clamp01 = v => Math.max(0, Math.min(1, v));
+function easeOutBounce(p){
+  const n1=7.5625, d1=2.75;
+  if(p < 1/d1) return n1*p*p;
+  if(p < 2/d1) return n1*(p-=1.5/d1)*p+0.75;
+  if(p < 2.5/d1) return n1*(p-=2.25/d1)*p+0.9375;
+  return n1*(p-=2.625/d1)*p+0.984375;
+}
 
 const off = document.createElement("canvas");
 const offCtx = off.getContext("2d");
@@ -787,7 +865,8 @@ function drawChromaFromOff(dx, dy, baseAlpha, split){
 }
 function beatPulse(t){
   let last = -10;
-  const src = beats.length ? beats : boundaries;
+  const abeats = activeBeats();
+  const src = abeats.length ? abeats : boundaries;
   for(const b of src){ if(b<=t) last=b; else break; }
   const dt = t - last;
   return dt>=0 ? Math.exp(-dt*7)*0.035 : 0;
@@ -809,13 +888,25 @@ function syncVideo(m, offset){
 
 function renderFrame(t){
   const W = cv.width, H = cv.height;
-  const accent = cAccent.value, txtCol = cText.value, fam = fontSel.value;
   const mainDur = +durRange.value;
-  if(t >= mainDur && outroLen() > 0){ drawOutroCard(t - mainDur, W, H); addFilmLook(W,H); return; }
+  if(t < mainDur){ renderMainFrame(t, W, H); return; }
+  let cursor = mainDur;
+  const fLen = filmstripLen();
+  if(fLen > 0){ if(t < cursor+fLen){ drawFilmStrip(t-cursor, W, H); return; } cursor += fLen; }
+  const sLen = shuffleLen();
+  if(sLen > 0){ if(t < cursor+sLen){ drawShuffleSeg(t-cursor, W, H); return; } cursor += sLen; }
+  const bLen = bradyLen();
+  if(bLen > 0){ if(t < cursor+bLen){ drawBradySeg(t-cursor, W, H); return; } cursor += bLen; }
+  const oLen = outroLen();
+  if(oLen > 0){ drawOutroCard(t-cursor, W, H); addFilmLook(W,H); return; }
+  renderMainFrame(mainDur-0.001, W, H);
+}
+function renderMainFrame(t, W, H){
+  const accent = cAccent.value, txtCol = cText.value, fam = fontSel.value;
+  const dur = +durRange.value;
   ctx.fillStyle = cBg.value; ctx.fillRect(0,0,W,H);
   if(!media.length){ drawIdleCard(W,H,accent,fam); addFilmLook(W,H); return; }
 
-  const dur = mainDur;
   const idx = Math.min(media.length-1, slideIndexAt(t));
   const sd = boundaries[idx+1] - boundaries[idx];
   const local = t - boundaries[idx];
@@ -909,6 +1000,27 @@ function renderFrame(t){
     ctx.globalAlpha = .1; ctx.fillStyle = "#000";
     for(let y=0; y<H; y+=4) ctx.fillRect(0,y,W,1);
     ctx.restore();
+  } else if(tr==="swirl"){
+    const e = easeOutBack(a);
+    ctx.save();
+    ctx.globalAlpha = clamp01(1 - a*1.2);
+    coverDraw(m.el, W, H, kb, 0, 0, 1);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(W/2,H/2);
+    ctx.rotate((1-e)*1.1*dir);
+    ctx.scale(0.25+0.75*e, 0.25+0.75*e);
+    ctx.translate(-W/2,-H/2);
+    coverDraw(nx.el, W, H, 1, 0, 0, clamp01(a*1.8));
+    ctx.restore();
+  } else if(tr==="bounce"){
+    const e = easeOutBounce(a);
+    ctx.save();
+    ctx.globalAlpha = clamp01(1 - a*1.3);
+    coverDraw(m.el, W, H, kb, 0, 0, 1);
+    ctx.restore();
+    const dropFrom = -H*0.5*(1-e);
+    coverDraw(nx.el, W, H, 1, 0, dropFrom, clamp01(a*1.6));
   }
 
   drawTexts(t, W, H, dur, accent, txtCol, fam);
@@ -1098,7 +1210,10 @@ function repaintIdle(){ if(!playing && !recording){ boundaries = media.length ? 
 
 /* ---------------- logo, watermark, year, outro ---------------- */
 function outroLen(){ return (endLogoOn.checked && logoImg) ? 1.2 : 0; }
-function totalDuration(){ return +durRange.value + outroLen(); }
+function filmstripLen(){ return (filmstripSegOn.checked && filmstripSet.arr.length) ? filmstripDuration() : 0; }
+function shuffleLen(){ return (shuffleSegOn.checked && shuffleSet.arr.length) ? shuffleDuration() : 0; }
+function bradyLen(){ return (bradySegOn.checked && bradySet.arr.length) ? bradyDuration() : 0; }
+function totalDuration(){ return +durRange.value + filmstripLen() + shuffleLen() + bradyLen() + outroLen(); }
 
 function drawOutroCard(lt, W, H){
   ctx.fillStyle = cBg.value; ctx.fillRect(0,0,W,H);
@@ -1123,7 +1238,6 @@ function drawOutroCard(lt, W, H){
 function drawWatermarkYear(W,H){
   const showWM = watermarkOn.checked && logoImg;
   const showYear = yearOn.checked;
-  if(!showWM && !showYear) return;
   const pad = W*0.035;
   ctx.save();
   if(showWM){
@@ -1132,36 +1246,206 @@ function drawWatermarkYear(W,H){
     const target = W*0.14;
     const sc = target/Math.max(iw,ih);
     const w = iw*sc, h = ih*sc;
-    const corner = wmCorner.value;
-    let x,y;
-    if(corner==="tr"){ x=W-pad-w; y=pad; }
-    else if(corner==="tl"){ x=pad; y=pad; }
-    else if(corner==="bl"){ x=pad; y=H-pad-h; }
-    else { x=W-pad-w; y=H-pad-h; }
+    const x = W-pad-w, y = H-pad-h;
     ctx.globalAlpha = alpha;
     ctx.drawImage(logoImg, x, y, w, h);
     ctx.globalAlpha = 1;
-    if(showYear){
-      const above = corner==="tr" || corner==="tl";
-      ctx.font = `600 ${Math.round(W*0.024)}px "Sora"`;
-      ctx.textBaseline = "alphabetic";
-      ctx.textAlign = (corner==="tl"||corner==="bl") ? "left" : "right";
-      const tx = (corner==="tl"||corner==="bl") ? x : x+w;
-      const ty = above ? y+h+W*0.028 : y-W*0.012;
-      ctx.fillStyle = "rgba(255,255,255,.9)";
-      ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 4;
-      ctx.fillText(yearSel.value, tx, ty);
-      ctx.shadowBlur = 0;
-    }
-  } else if(showYear){
+  }
+  if(showYear){
     ctx.font = `600 ${Math.round(W*0.026)}px "Sora"`;
-    ctx.textAlign = "right"; ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
     ctx.fillStyle = "rgba(255,255,255,.9)";
     ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 4;
-    ctx.fillText(yearSel.value, W-pad, H-pad);
+    ctx.fillText(yearSel.value, pad, H-pad);
     ctx.shadowBlur = 0;
   }
   ctx.restore();
+  drawSectionWatermark(W, H, showYear);
+}
+function drawSectionWatermark(W, H, yearShown){
+  const name = sectionName.value.trim();
+  if(!sectionWatermarkOn.checked || !name) return;
+  const pad = W*0.035;
+  const lift = yearShown ? W*0.045 : 0;
+  ctx.save();
+  ctx.font = `600 ${Math.round(W*0.026)}px "Sora"`;
+  ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "rgba(255,255,255,.9)";
+  ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 4;
+  ctx.fillText(name.toUpperCase(), pad, H-pad-lift);
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+/* ---------------- extra segment photo sets (film strip / shuffle / brady) ---------------- */
+function makePhotoSet(prefix, {cap=Infinity} = {}){
+  const arr = [];
+  const dropEl = document.getElementById(prefix+"Drop");
+  const inputEl = document.getElementById(prefix+"Input");
+  const thumbsEl = document.getElementById(prefix+"Thumbs");
+  dropEl.addEventListener("keydown", e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); inputEl.click(); } });
+  dropEl.addEventListener("dragover", e=>{e.preventDefault(); dropEl.classList.add("over");});
+  dropEl.addEventListener("dragleave", ()=>dropEl.classList.remove("over"));
+  dropEl.addEventListener("drop", e=>{e.preventDefault(); dropEl.classList.remove("over"); addPhotos(e.dataTransfer.files);});
+  inputEl.addEventListener("change", ()=>{ addPhotos(inputEl.files); inputEl.value=""; });
+
+  function addPhotos(list){
+    const files = [...list].filter(f=>f.type.startsWith("image/"));
+    if(!files.length) return;
+    let ignored = 0, queued = arr.length;
+    files.forEach(f=>{
+      if(queued >= cap){ ignored++; return; }
+      queued++;
+      const url = URL.createObjectURL(f);
+      const img = new Image();
+      img.onload = ()=>{ if(arr.length < cap) arr.push({el:img, url}); render(); repaintIdle(); };
+      img.onerror = ()=>{ statusEl.innerHTML = `Couldn't read image <b>${f.name}</b>.`; };
+      img.src = url;
+    });
+    if(ignored) statusEl.textContent = `Only ${cap} photos are used here; ${ignored} extra ignored.`;
+  }
+  function render(){
+    thumbsEl.innerHTML = "";
+    arr.forEach((m,i)=>{
+      const t = document.createElement("div"); t.className = "thumb";
+      t.innerHTML = `<img src="${m.url}" alt="photo ${i+1}">
+        <div class="tools">
+          <button title="Move earlier" data-a="up" data-i="${i}">←</button>
+          <button class="del" title="Remove" data-a="del" data-i="${i}">×</button>
+          <button title="Move later" data-a="dn" data-i="${i}">→</button>
+        </div>`;
+      thumbsEl.appendChild(t);
+    });
+    thumbsEl.querySelectorAll("button").forEach(b=>b.addEventListener("click", ()=>{
+      const i = +b.dataset.i, a = b.dataset.a;
+      if(a==="del") arr.splice(i,1);
+      if(a==="up" && i>0) [arr[i-1],arr[i]] = [arr[i],arr[i-1]];
+      if(a==="dn" && i<arr.length-1) [arr[i+1],arr[i]] = [arr[i],arr[i+1]];
+      render(); repaintIdle();
+    }));
+  }
+  return {arr, render};
+}
+const filmstripSet = makePhotoSet("filmstrip");
+const shuffleSet = makePhotoSet("shuffle");
+const bradySet = makePhotoSet("brady", {cap:8});
+
+const filmstripSegOn = document.getElementById("filmstripSegOn");
+const shuffleSegOn = document.getElementById("shuffleSegOn");
+const bradySegOn = document.getElementById("bradySegOn");
+function guardSegToggle(box, set, label){
+  box.addEventListener("change", ()=>{
+    if(box.checked && !set.arr.length){
+      box.checked = false;
+      statusEl.textContent = `Add at least one photo to the ${label} set first.`;
+      return;
+    }
+    repaintIdle();
+  });
+}
+guardSegToggle(filmstripSegOn, filmstripSet, "film strip");
+guardSegToggle(shuffleSegOn, shuffleSet, "fast shuffle");
+guardSegToggle(bradySegOn, bradySet, "Brady Bunch grid");
+
+/* ---------------- film strip reveal segment ---------------- */
+function filmstripDuration(){
+  const n = filmstripSet.arr.length;
+  return n ? Math.max(3, Math.min(8, 2 + n*1.1)) : 0;
+}
+function drawFilmStrip(lt, W, H){
+  ctx.fillStyle = "#0B0B0E"; ctx.fillRect(0,0,W,H);
+  const media2 = filmstripSet.arr, n = media2.length;
+  const dur = filmstripDuration();
+  const p = clamp01(lt/dur);
+  const frameH = H*0.5, bandY = (H-frameH)/2;
+  const frameW = frameH, gap = frameW*0.14;
+  const totalStripW = n*(frameW+gap);
+  const travel = totalStripW + W;
+  const x0 = W - travel*easeInOutQuart(p);
+
+  for(let i=0;i<n;i++){
+    const fx = x0 + i*(frameW+gap);
+    if(fx+frameW < -20 || fx > W+20) continue;
+    ctx.fillStyle = "#111";
+    ctx.fillRect(fx-6, bandY-6, frameW+12, frameH+12);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(fx, bandY, frameW, frameH); ctx.clip();
+    const el = media2[i].el;
+    const iw = el.naturalWidth||1, ih = el.naturalHeight||1;
+    const s = Math.max(frameW/iw, frameH/ih);
+    const dw = iw*s, dh = ih*s;
+    ctx.drawImage(el, fx+(frameW-dw)/2, bandY+(frameH-dh)/2, dw, dh);
+    ctx.restore();
+  }
+
+  const holeR = frameH*0.045, pitch = frameH*0.22;
+  const holeOffset = ((x0 % pitch) + pitch) % pitch;
+  ctx.fillStyle = "#F2EFE6";
+  for(let hx = holeOffset - pitch; hx < W+pitch; hx += pitch){
+    ctx.beginPath(); ctx.ellipse(hx, bandY - frameH*0.09, holeR, holeR*1.3, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(hx, bandY + frameH + frameH*0.09, holeR, holeR*1.3, 0, 0, Math.PI*2); ctx.fill();
+  }
+  addFilmLook(W,H);
+  drawWatermarkYear(W,H);
+}
+
+/* ---------------- fast shuffle segment ---------------- */
+function shuffleDuration(){
+  const n = shuffleSet.arr.length;
+  return n ? Math.max(1.6, Math.min(5, n*0.16)) : 0;
+}
+function drawShuffleSeg(lt, W, H){
+  ctx.fillStyle = "#000"; ctx.fillRect(0,0,W,H);
+  const media2 = shuffleSet.arr, n = media2.length;
+  const dur = shuffleDuration(), per = dur/n;
+  const idx = Math.min(n-1, Math.floor(lt/per));
+  const local = lt - idx*per;
+  const p = clamp01(local/per);
+  const el = media2[idx].el;
+  const rot = shuffleSeeds[idx] || 0;
+  const scale = 1.08 - 0.08*easeOutQuint(p);
+  ctx.save();
+  ctx.translate(W/2,H/2); ctx.rotate(rot); ctx.scale(scale,scale); ctx.translate(-W/2,-H/2);
+  coverDraw(el, W, H, 1.06, 0, 0, 1);
+  ctx.restore();
+  const flash = clamp01(1 - p/0.12) * 0.25;
+  if(flash > 0){ ctx.fillStyle = `rgba(255,255,255,${flash})`; ctx.fillRect(0,0,W,H); }
+  addFilmLook(W,H);
+  drawWatermarkYear(W,H);
+}
+
+/* ---------------- brady bunch grid segment ---------------- */
+function bradyDuration(){ return bradySet.arr.length ? 3.2 : 0; }
+function drawBradySeg(lt, W, H){
+  ctx.fillStyle = "#0B0B0E"; ctx.fillRect(0,0,W,H);
+  const media2 = bradySet.arr, n = Math.min(8, media2.length);
+  const cols = W>=H ? 4 : 2, rows = Math.ceil(8/cols);
+  const gap = W*0.012;
+  const cellW = (W-gap*(cols+1))/cols, cellH = (H-gap*(rows+1))/rows;
+  const stagger = 1.4/8*0.7;
+  for(let i=0;i<8;i++){
+    const col = i%cols, row = Math.floor(i/cols);
+    const x = gap + col*(cellW+gap), y = gap + row*(cellH+gap);
+    const p = clamp01((lt - i*stagger)/0.4);
+    if(p <= 0) continue;
+    const s = easeOutBack(p);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x,y,cellW,cellH); ctx.clip();
+    ctx.translate(x+cellW/2, y+cellH/2); ctx.scale(s,s); ctx.translate(-(x+cellW/2), -(y+cellH/2));
+    if(i < n){
+      const el = media2[i].el;
+      const iw = el.naturalWidth||1, ih = el.naturalHeight||1;
+      const sc = Math.max(cellW/iw, cellH/ih);
+      const dw = iw*sc, dh = ih*sc;
+      ctx.drawImage(el, x+(cellW-dw)/2, y+(cellH-dh)/2, dw, dh);
+    } else {
+      ctx.fillStyle = "#1A1A1F"; ctx.fillRect(x,y,cellW,cellH);
+    }
+    ctx.restore();
+    ctx.strokeStyle = "#0B0B0E"; ctx.lineWidth = gap; ctx.strokeRect(x,y,cellW,cellH);
+  }
+  addFilmLook(W,H);
+  drawWatermarkYear(W,H);
 }
 
 /* ---------------- preview & export ---------------- */
@@ -1189,7 +1473,7 @@ previewBtn.addEventListener("click", async ()=>{
   await document.fonts.ready;
   closeTrim(); buildRunPlan();
   playing = true; previewBtn.textContent = "Stop";
-  if(musicEl){ musicEl.currentTime=0; musicEl.play().catch(()=>{}); }
+  if(musicEl){ musicEl.currentTime=musicStartSec(); musicEl.play().catch(()=>{}); }
   statusEl.textContent = "Previewing…";
   runTimeline(()=>{ playing=false; previewBtn.textContent="Preview"; stopAllVideos(); statusEl.textContent="Preview done. Shuffle picks fresh transitions each run, so preview again for a new mix."; });
 });
@@ -1213,7 +1497,7 @@ exportBtn.addEventListener("click", async ()=>{
     const dest = sharedAudioCtx.createMediaStreamDestination();
     musicSrcNode.connect(dest);
     dest.stream.getAudioTracks().forEach(tr=>stream.addTrack(tr));
-    musicEl.currentTime = 0; musicEl.play().catch(()=>{});
+    musicEl.currentTime = musicStartSec(); musicEl.play().catch(()=>{});
   }
 
   const types = ["video/mp4","video/webm;codecs=vp9","video/webm"];
