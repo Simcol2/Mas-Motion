@@ -496,7 +496,7 @@ function addFiles(list){
     const isVid = f.type.startsWith("video/") || /\.(mp4|mov|webm|m4v|3gp)$/i.test(f.name);
     if(f.type.startsWith("image/")){
       const el = new Image(); el.src = url;
-      el.onload = ()=>{ media.push({kind:"img", el, url, blob:f}); renderThumbs(); repaintIdle(); scheduleAutosave(); };
+      el.onload = ()=>{ media.push({kind:"img", el, url, blob:f, draw:makeDrawCopy(el)}); renderThumbs(); repaintIdle(); scheduleAutosave(); };
       el.onerror = ()=>{ statusEl.innerHTML = `Couldn't read image <b>${f.name}</b>.`; };
     } else if(isVid){
       const el = document.createElement("video");
@@ -978,6 +978,21 @@ function coverDraw(el, W, H, scale=1, dx=0, dy=0, alpha=1){
   ctx.drawImage(el, (W-dw)/2 + dx, (H-dh)/2 + dy, dw, dh);
   ctx.globalAlpha = 1;
 }
+/* Phone photos are huge (e.g. 4000px). Redrawing several of those every frame — the Brady
+   grid alone redraws up to 8 per frame — is too much pixel work to sustain 30fps while
+   recording, so the capture stutters (visible in the exported file too). The output canvas
+   is only ever ≤1920px, so we draw from a one-time downscaled copy capped at 1920px: much
+   cheaper per frame, and zero quality loss since the final video is never larger than that. */
+function makeDrawCopy(img, maxSide=1920){
+  const iw = img.naturalWidth||img.width, ih = img.naturalHeight||img.height;
+  if(!iw || !ih || Math.max(iw,ih) <= maxSide) return null; // already small enough
+  const s = maxSide/Math.max(iw,ih);
+  const c = document.createElement("canvas");
+  c.width = Math.round(iw*s); c.height = Math.round(ih*s);
+  try{ c.getContext("2d").drawImage(img, 0, 0, c.width, c.height); }catch(e){ return null; }
+  return c;
+}
+function imgSrc(m){ return (m && m.draw) ? m.draw : (m && m.el); }
 function wrapText(text, maxW, fontPx, fam){
   ctx.font = fontStr(fontPx, fam);
   const words = text.split(" "), lines = []; let line = "";
@@ -1095,6 +1110,10 @@ function renderFrame(t){
   const W = cv.width, H = cv.height;
   const mainDur = +durRange.value;
   if(t < mainDur){ renderMainFrame(t, W, H); return; }
+  // Past the main reel: pause every slideshow clip so no video is still decoding in the
+  // background during the Brady / shuffle / film-strip segments. A clip left decoding
+  // competes for the phone's video pipeline and makes those fast segments stutter.
+  for(const mm of media){ if(mm.kind==="vid" && !mm.el.paused){ try{ mm.el.pause(); }catch(e){} } }
   let cursor = mainDur;
   const fLen = filmstripLen();
   if(fLen > 0){ if(t < cursor+fLen){ drawFilmStrip(t-cursor, W, H); return; } cursor += fLen; }
@@ -1148,50 +1167,52 @@ function renderMainFrame(t, W, H){
     if(nx.kind==="vid") syncVideo(nx, 0);
     tr = transSeq[idx] || "punch";
   }
+  // draw from downscaled copies for images (cheap); videos fall through to their element
+  const mEl = imgSrc(m), nxEl = nx ? imgSrc(nx) : null;
 
   if(!inTrans){
-    coverDraw(m.el, W, H, kb, dir * 0.025*W * prog, 0, 1);
+    coverDraw(mEl, W, H, kb, dir * 0.025*W * prog, 0, 1);
   } else if(tr==="whip"){
     const e = easeInOutQuart(a), offX = W*e*dir;
     const speed = Math.sin(a*Math.PI);
     ctx.save();
     ctx.filter = `blur(${Math.round(20*speed)}px)`;
-    coverDraw(m.el, W, H, kb, -offX, 0, 1);
-    coverDraw(nx.el, W, H, 1.02, dir*W - offX, 0, 1);
+    coverDraw(mEl, W, H, kb, -offX, 0, 1);
+    coverDraw(nxEl, W, H, 1.02, dir*W - offX, 0, 1);
     ctx.restore();
     const crisp = 1 - speed;
     if(crisp > 0.04){
-      coverDraw(m.el, W, H, kb, -offX, 0, crisp);
-      coverDraw(nx.el, W, H, 1.02, dir*W - offX, 0, crisp);
+      coverDraw(mEl, W, H, kb, -offX, 0, crisp);
+      coverDraw(nxEl, W, H, 1.02, dir*W - offX, 0, crisp);
     }
   } else if(tr==="punch"){
     const e = easeOutQuint(a);
     ctx.save();
     ctx.filter = `blur(${Math.round(16*(1-a))}px)`;
     ctx.globalAlpha = clamp01(1 - a*1.1);
-    coverDraw(m.el, W, H, kb*(1+0.32*a), 0, 0, 1);
+    coverDraw(mEl, W, H, kb*(1+0.32*a), 0, 0, 1);
     ctx.restore();
     ctx.globalAlpha = 1;
     const shake = (a>0.15 && a<0.55) ? (Math.random()-0.5)*W*0.014*(1-a) : 0;
     ctx.save();
     if(a < 0.55) ctx.filter = `blur(${Math.round(14*(0.55-a))}px)`;
-    coverDraw(nx.el, W, H, 1.4 - 0.4*e, shake, shake*0.6, clamp01(a*2.2));
+    coverDraw(nxEl, W, H, 1.4 - 0.4*e, shake, shake*0.6, clamp01(a*2.2));
     ctx.restore();
   } else if(tr==="spin"){
     const e = easeOutQuint(a);
     const speed = Math.sin(a*Math.PI);
     ctx.save();
     ctx.filter = `blur(${Math.round(10*speed)}px)`;
-    coverDraw(m.el, W, H, kb, 0, 0, clamp01(1-a*1.2));
+    coverDraw(mEl, W, H, kb, 0, 0, clamp01(1-a*1.2));
     ctx.restore();
     ctx.save();
     ctx.translate(W/2,H/2); ctx.rotate((1-e)*0.22*dir); ctx.translate(-W/2,-H/2);
     ctx.filter = `blur(${Math.round(12*speed)}px)`;
-    coverDraw(nx.el, W, H, 1 + 0.45*(1-e), 0, 0, clamp01(a*1.8));
+    coverDraw(nxEl, W, H, 1 + 0.45*(1-e), 0, 0, clamp01(a*1.8));
     ctx.restore();
   } else if(tr==="glitch"){
     const src = a < 0.5 ? m : nx;
-    drawToOff(src.el, W, H, src===m ? kb : 1.02);
+    drawToOff(src===m ? mEl : nxEl, W, H, src===m ? kb : 1.02);
     const slices = 10, sliceH = H/slices;
     const amp = Math.sin(a*Math.PI) * 0.08 * W;
     ctx.save();
@@ -1215,23 +1236,23 @@ function renderMainFrame(t, W, H){
     const e = easeOutBack(a);
     ctx.save();
     ctx.globalAlpha = clamp01(1 - a*1.2);
-    coverDraw(m.el, W, H, kb, 0, 0, 1);
+    coverDraw(mEl, W, H, kb, 0, 0, 1);
     ctx.restore();
     ctx.save();
     ctx.translate(W/2,H/2);
     ctx.rotate((1-e)*1.1*dir);
     ctx.scale(0.25+0.75*e, 0.25+0.75*e);
     ctx.translate(-W/2,-H/2);
-    coverDraw(nx.el, W, H, 1, 0, 0, clamp01(a*1.8));
+    coverDraw(nxEl, W, H, 1, 0, 0, clamp01(a*1.8));
     ctx.restore();
   } else if(tr==="bounce"){
     const e = easeOutBounce(a);
     ctx.save();
     ctx.globalAlpha = clamp01(1 - a*1.3);
-    coverDraw(m.el, W, H, kb, 0, 0, 1);
+    coverDraw(mEl, W, H, kb, 0, 0, 1);
     ctx.restore();
     const dropFrom = -H*0.5*(1-e);
-    coverDraw(nx.el, W, H, 1, 0, dropFrom, clamp01(a*1.6));
+    coverDraw(nxEl, W, H, 1, 0, dropFrom, clamp01(a*1.6));
   }
 
   drawTexts(t, W, H, dur, accent, txtCol, fam);
@@ -1546,7 +1567,7 @@ function makePhotoSet(prefix, {cap=Infinity} = {}){
       queued++;
       const url = URL.createObjectURL(f);
       const img = new Image();
-      img.onload = ()=>{ if(arr.length < cap) arr.push({el:img, url, blob:f}); render(); repaintIdle(); scheduleAutosave(); };
+      img.onload = ()=>{ if(arr.length < cap) arr.push({el:img, url, blob:f, draw:makeDrawCopy(img)}); render(); repaintIdle(); scheduleAutosave(); };
       img.onerror = ()=>{ statusEl.innerHTML = `Couldn't read image <b>${f.name}</b>.`; };
       img.src = url;
     });
@@ -1642,8 +1663,8 @@ function drawFilmStrip(lt, W, H){
     ctx.fillStyle = "#151515"; ctx.fillRect(fx-10, fy-gap*0.4, frameW+20, frameH+gap*0.8);
     ctx.save();
     ctx.beginPath(); ctx.rect(fx, fy, frameW, frameH); ctx.clip();
-    const el = arr[k].el;
-    const iw = el.naturalWidth||1, ih = el.naturalHeight||1;
+    const el = imgSrc(arr[k]);
+    const iw = el.naturalWidth||el.width||1, ih = el.naturalHeight||el.height||1;
     const s = Math.max(frameW/iw, frameH/ih);
     const dw = iw*s, dh = ih*s;
     ctx.drawImage(el, fx+(frameW-dw)/2, fy+(frameH-dh)/2, dw, dh);
@@ -1682,7 +1703,7 @@ function drawShuffleSeg(lt, W, H){
   const idx = Math.min(n-1, Math.floor(lt/per));
   const local = lt - idx*per;
   const p = clamp01(local/per);
-  const el = media2[idx].el;
+  const el = imgSrc(media2[idx]);
   const rot = shuffleSeeds[idx] || 0;
   const scale = 1.08 - 0.08*easeOutQuint(p);
   ctx.save();
@@ -1719,8 +1740,8 @@ function drawBradySeg(lt, W, H){
     ctx.beginPath(); ctx.rect(x,y,cellW,cellH); ctx.clip();
     ctx.translate(x+cellW/2, y+cellH/2); ctx.scale(s,s); ctx.translate(-(x+cellW/2), -(y+cellH/2));
     if(i < n){
-      const el = media2[i].el;
-      const iw = el.naturalWidth||1, ih = el.naturalHeight||1;
+      const el = imgSrc(media2[i]);
+      const iw = el.naturalWidth||el.width||1, ih = el.naturalHeight||el.height||1;
       const sc = Math.max(cellW/iw, cellH/ih);
       const dw = iw*sc, dh = ih*sc;
       ctx.drawImage(el, x+(cellW-dw)/2, y+(cellH-dh)/2, dw, dh);
@@ -1863,7 +1884,7 @@ async function loadImageBlobInto(set, blob){
   return new Promise(resolve=>{
     const url = URL.createObjectURL(blob);
     const img = new Image();
-    img.onload = ()=>{ set.arr.push({el:img, url, blob}); resolve(); };
+    img.onload = ()=>{ set.arr.push({el:img, url, blob, draw:makeDrawCopy(img)}); resolve(); };
     img.src = url;
   });
 }
@@ -1954,7 +1975,7 @@ async function applyProjectRecord(project){
     if(m.kind==="img"){
       await new Promise(res=>{
         const el=new Image(); let done=false;
-        el.onload=()=>{ if(done)return; done=true; media.push({kind:"img", el, url, blob:m.blob}); res(); };
+        el.onload=()=>{ if(done)return; done=true; media.push({kind:"img", el, url, blob:m.blob, draw:makeDrawCopy(el)}); res(); };
         el.onerror=()=>{ if(done)return; done=true; res(); };
         setTimeout(()=>{ if(done)return; done=true; res(); }, 6000);
         el.src=url;
