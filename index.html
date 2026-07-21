@@ -941,34 +941,21 @@ function syncVideo(m, offset){
   const end = m.trim.start + m.trim.len;
   if(v.paused){
     try{ v.currentTime = m.trim.start + (offset % m.trim.len); v.play(); }catch(e){}
-    m._stallCt = v.currentTime; m._stallSince = performance.now();
     return;
   }
   if(v.currentTime >= end - 0.06 || v.currentTime < m.trim.start - 0.2){
     try{ v.currentTime = m.trim.start; }catch(e){}
-    m._stallCt = m.trim.start; m._stallSince = performance.now();
-    return;
-  }
-  // Watchdog: some clips silently stall mid-playback (buffering hiccup) without ever
-  // reporting paused=true, which used to freeze the visible frame until the slide
-  // boundary moved on. If currentTime hasn't actually advanced for a beat, kick it.
-  const now = performance.now();
-  if(m._stallCt === undefined || Math.abs(v.currentTime - m._stallCt) > 0.01){
-    m._stallCt = v.currentTime; m._stallSince = now;
-  } else if(now - (m._stallSince || now) > 350){
-    try{ v.play(); v.currentTime = Math.min(end - 0.03, v.currentTime + 0.05); }catch(e){}
-    m._stallSince = now;
   }
 }
 /* Pre-seek + pre-buffer every clip to its trim point before the run starts, so nothing
-   has to cold-buffer for the first time right as it's needed mid-timeline/transition. */
+   has to cold-buffer for the first time right as it's needed mid-timeline/transition.
+   Each seek is capped so a clip that never fires "seeked" can't stall the whole export. */
 async function primeVideos(){
   const vids = media.filter(m=>m.kind==="vid");
   await Promise.all(vids.map(async m=>{
     try{
       m.el.pause();
-      await seekTo(m.el, m.trim.start);
-      m._stallCt = m.el.currentTime; m._stallSince = performance.now();
+      await Promise.race([seekTo(m.el, m.trim.start), new Promise(res=>setTimeout(res, 3000))]);
     }catch(e){}
   }));
 }
