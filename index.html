@@ -456,7 +456,7 @@ function applyTemplate(name){
 
 /* ---------------- state ---------------- */
 const media = [];        // {kind:'img'|'vid', el, url, trim:{start,len}, dur}
-let musicEl = null, musicSrcNode = null, sharedAudioCtx = null;
+let musicEl = null, musicSrcNode = null, musicGain = null, sharedAudioCtx = null;
 let beats = [];
 let boundaries = [];
 let transSeq = [], lineAnims = [];
@@ -755,7 +755,7 @@ let currentPresetMusicPath = null;
 async function loadMusicFromFile(f){
   if(musicEl){ musicEl.pause(); }
   musicEl = new Audio(URL.createObjectURL(f)); musicEl.preload = "auto";
-  musicSrcNode = null; beats = [];
+  musicSrcNode = null; musicGain = null; beats = [];
   musicStartRange.value = 0; musicStartRange.disabled = true; musicStartRange.max = 0;
   musicStartLabel.textContent = "0s";
   musicStatus.textContent = "Listening for the beat…";
@@ -1770,6 +1770,29 @@ previewBtn.addEventListener("click", async ()=>{
 exportBtn.addEventListener("click", async ()=>{
   if(recording) return;
   if(!media.length){ statusEl.textContent = "Add at least one photo or clip first."; return; }
+
+  // Unlock audio RIGHT NOW, inside the tap, before any await. The prep below (fonts,
+  // buffering clips) is async, and on mobile Chrome those awaits expire the tap's
+  // "user gesture" — after which play()/resume() are blocked and the recording gets a
+  // silent track (music missing from the export). We start the music here, but held at
+  // zero volume by a gain node so nothing is heard until recording actually begins.
+  if(musicEl){
+    try{
+      if(!sharedAudioCtx) sharedAudioCtx = new (window.AudioContext||window.webkitAudioContext)();
+      sharedAudioCtx.resume();
+      if(!musicSrcNode){
+        musicSrcNode = sharedAudioCtx.createMediaElementSource(musicEl);
+        musicGain = sharedAudioCtx.createGain();
+        musicSrcNode.connect(musicGain);
+        musicGain.connect(sharedAudioCtx.destination);
+      }
+      musicGain.gain.value = 0;                 // silent during the async prep
+      musicEl.currentTime = musicStartSec();
+      musicEl.loop = true;                       // never run out before the reel ends
+      musicEl.play().catch(()=>{});              // element unlocked within the gesture
+    }catch(e){}
+  }
+
   await document.fonts.ready;
   closeTrim(); buildRunPlan();
   dlLink.style.display = "none";
@@ -1778,20 +1801,25 @@ exportBtn.addEventListener("click", async ()=>{
   await primeVideos();
 
   const stream = cv.captureStream(30);
-  if(musicEl){
-    if(!sharedAudioCtx) sharedAudioCtx = new (window.AudioContext||window.webkitAudioContext)();
-    if(sharedAudioCtx.state === "suspended") await sharedAudioCtx.resume();
-    if(!musicSrcNode){
-      musicSrcNode = sharedAudioCtx.createMediaElementSource(musicEl);
-      musicSrcNode.connect(sharedAudioCtx.destination);
-    }
-    const dest = sharedAudioCtx.createMediaStreamDestination();
-    musicSrcNode.connect(dest);
-    dest.stream.getAudioTracks().forEach(tr=>stream.addTrack(tr));
-    musicEl.currentTime = musicStartSec(); musicEl.play().catch(()=>{});
+  let musicTrackAdded = false;
+  if(musicEl && musicSrcNode){
+    try{
+      if(sharedAudioCtx.state === "suspended") sharedAudioCtx.resume();
+      const dest = sharedAudioCtx.createMediaStreamDestination();
+      musicGain.connect(dest);
+      dest.stream.getAudioTracks().forEach(tr=>{ stream.addTrack(tr); musicTrackAdded = true; });
+      musicEl.currentTime = musicStartSec();
+      if(musicEl.paused) musicEl.play().catch(()=>{});
+      musicGain.gain.value = 1;                  // now audible AND captured
+    }catch(e){}
   }
 
-  const types = ["video/mp4","video/webm;codecs=vp9","video/webm"];
+  // With music, force an audio-capable container (webm+opus). Bare video/mp4 from
+  // MediaRecorder can come out video-only on some Chrome builds, which silently drops
+  // the soundtrack. No music → mp4 is fine and more widely shareable.
+  const types = musicTrackAdded
+    ? ["video/webm;codecs=vp9,opus","video/webm;codecs=vp8,opus","video/webm;codecs=opus","video/webm"]
+    : ["video/mp4","video/webm;codecs=vp9","video/webm"];
   const mime = types.find(t=>MediaRecorder.isTypeSupported(t)) || "";
   const rec = new MediaRecorder(stream, mime?{mimeType:mime, videoBitsPerSecond: 20_000_000, audioBitsPerSecond: 192_000}:{});
   const chunks = [];
@@ -1802,7 +1830,8 @@ exportBtn.addEventListener("click", async ()=>{
     dlLink.href = URL.createObjectURL(blob);
     dlLink.download = "mas-motion-reel." + ext;
     dlLink.style.display = "block";
-    statusEl.innerHTML = `Done! <b>${ext.toUpperCase()}</b> ready below, soundtrack included, clips muted.` +
+    statusEl.innerHTML = `Done! <b>${ext.toUpperCase()}</b> ready below` +
+      (musicTrackAdded ? ", soundtrack included, clips muted." : (musicEl ? ", but the soundtrack couldn't be added this time — tap Export again." : ", clips muted.")) +
       (ext==="webm" ? " If a platform rejects WEBM, share it to CapCut or your gallery and it converts to MP4 on import." : "");
     recording = false; exportBtn.disabled = false; previewBtn.disabled = false;
     stopAllVideos();
