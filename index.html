@@ -175,6 +175,18 @@
   <div class="kente" id="kenteBar"></div>
 </header>
 
+<div style="max-width:1240px; margin:16px auto 0; padding:0 24px;">
+  <section class="panel" style="border-top-color:var(--yellow-deep);">
+    <h2 style="color:var(--yellow-deep)">Continue where you left off</h2>
+    <p class="hint" style="margin:0 0 10px">Projects save right on this device (this browser) — photos, videos, text and settings, so you don't have to redo any of it.</p>
+    <div class="preset-row">
+      <select id="projectSel"><option value="">— no saved projects yet —</option></select>
+      <button id="loadProject" title="Load this project">Load</button>
+      <button id="deleteProject" title="Delete this project">Delete</button>
+    </div>
+  </section>
+</div>
+
 <main>
   <div class="controls">
 
@@ -248,6 +260,18 @@
       <h2>4 · Music &amp; Timing</h2>
       <label for="musicInput">Soundtrack (clips are always muted, only this plays)</label>
       <input type="file" id="musicInput" accept="audio/*" style="color:var(--muted); font-size:13px;">
+      <label for="presetMusicSel">Or pick a preloaded soca track</label>
+      <select id="presetMusicSel">
+        <option value="">— none, upload your own above —</option>
+        <option value="music/machel-montano-encore.mp3">Machel Montano — Encore</option>
+        <option value="music/voice-cyah-behave.mp3">Voice — Cyah Behave</option>
+        <option value="music/bunji-garlin-hard-fete.mp3">Bunji Garlin — Hard Fete</option>
+        <option value="music/lyrikal-look-back.mp3">Lyrikal — Look Back (Benna Riddim)</option>
+        <option value="music/nadia-batson-market.mp3">Nadia Batson — Market</option>
+        <option value="music/patrice-roberts-mind-my-business.mp3">Patrice Roberts — Mind My Business (Happy Papi Riddim)</option>
+        <option value="music/shal-marshall-splinters.mp3">Shal Marshall — Splinters</option>
+        <option value="music/2026-kiddies-mix.mp3">2026 Kiddies Mix</option>
+      </select>
       <p class="music-status" id="musicStatus"></p>
       <label for="musicStartRange">Music starts at: <b id="musicStartLabel">0s</b></label>
       <input type="range" id="musicStartRange" min="0" max="0" step="1" value="0" disabled>
@@ -360,6 +384,9 @@
     </section>
 
     <div class="btnrow">
+      <button class="btn btn-ghost" id="saveProjectBtn">💾 Save project for later</button>
+    </div>
+    <div class="btnrow">
       <button class="btn btn-ghost" id="previewBtn">Preview</button>
       <button class="btn btn-main" id="exportBtn">Export video</button>
     </div>
@@ -425,6 +452,15 @@ let boundaries = [];
 let transSeq = [], lineAnims = [];
 let playing = false, recording = false, rafId = null, startTs = 0;
 let trimIndex = -1;
+let runOrder = [];
+function shuffleOrder(n){
+  const arr = Array.from({length:n}, (_,i)=>i);
+  for(let i=arr.length-1; i>0; i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [arr[i],arr[j]] = [arr[j],arr[i]];
+  }
+  return arr;
+}
 
 const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
 const statusEl = document.getElementById("status"), progFill = document.getElementById("progFill");
@@ -639,8 +675,8 @@ function activeBeats(){
 }
 musicStartRange.addEventListener("input", ()=>{ musicStartLabel.textContent = Math.round(+musicStartRange.value)+"s"; repaintIdle(); });
 
-document.getElementById("musicInput").addEventListener("change", async e=>{
-  const f = e.target.files[0]; if(!f) return;
+let currentPresetMusicPath = null;
+async function loadMusicFromFile(f){
   if(musicEl){ musicEl.pause(); }
   musicEl = new Audio(URL.createObjectURL(f)); musicEl.preload = "auto";
   musicSrcNode = null; beats = [];
@@ -659,6 +695,27 @@ document.getElementById("musicInput").addEventListener("change", async e=>{
       : "♪ Loaded. Couldn't find a clear beat, slides will space evenly.";
   }catch(err){
     musicStatus.textContent = "♪ Loaded (beat scan not supported here, slides will space evenly).";
+  }
+}
+
+document.getElementById("musicInput").addEventListener("change", e=>{
+  const f = e.target.files[0]; if(!f) return;
+  currentPresetMusicPath = null;
+  presetMusicSel.value = "";
+  loadMusicFromFile(f);
+});
+
+const presetMusicSel = document.getElementById("presetMusicSel");
+presetMusicSel.addEventListener("change", async ()=>{
+  const path = presetMusicSel.value;
+  if(!path) return;
+  musicStatus.textContent = "Loading track…";
+  try{
+    const blob = await (await fetch(path)).blob();
+    currentPresetMusicPath = path;
+    await loadMusicFromFile(blob);
+  }catch(e){
+    musicStatus.textContent = "Couldn't load that track.";
   }
 });
 function detectBeats(buf){
@@ -773,6 +830,7 @@ const TEXT_ANIMS = ["wordpop","box","slam"];
 let shuffleSeeds = [];
 function buildRunPlan(){
   boundaries = computeBoundaries();
+  runOrder = shuffleOrder(media.length);
   const style = motionSel.value;
   const nT = Math.max(0, media.length - 1);
   transSeq = [];
@@ -863,14 +921,6 @@ function drawChromaFromOff(dx, dy, baseAlpha, split){
   ctx.drawImage(off, dx, dy);
   ctx.globalAlpha = 1;
 }
-function beatPulse(t){
-  let last = -10;
-  const abeats = activeBeats();
-  const src = abeats.length ? abeats : boundaries;
-  for(const b of src){ if(b<=t) last=b; else break; }
-  const dt = t - last;
-  return dt>=0 ? Math.exp(-dt*7)*0.035 : 0;
-}
 function slideIndexAt(t){
   for(let i=0;i<boundaries.length-1;i++){
     if(t >= boundaries[i] && t < boundaries[i+1]) return i;
@@ -911,19 +961,16 @@ function renderMainFrame(t, W, H){
   const sd = boundaries[idx+1] - boundaries[idx];
   const local = t - boundaries[idx];
   const prog = Math.min(1, local/sd);
+  const order = runOrder.length===media.length ? runOrder : media.map((_,i)=>i);
+  const realIdx = order[idx], realNextIdx = order[idx+1];
 
   media.forEach((m,i)=>{
     if(m.kind!=="vid") return;
-    if(i===idx || (i===idx+1 && local > sd - 0.6)) return;
+    if(i===realIdx || (i===realNextIdx && local > sd - 0.6)) return;
     if(!m.el.paused) m.el.pause();
   });
 
-  /* everything breathes with the beat */
-  const pulse = 1 + beatPulse(t);
-  ctx.save();
-  ctx.translate(W/2,H/2); ctx.scale(pulse,pulse); ctx.translate(-W/2,-H/2);
-
-  const m = media[idx];
+  const m = media[realIdx];
   if(m.kind==="vid") syncVideo(m, local);
   const kb = m.kind==="img" ? 1.06 + 0.14*prog : 1;
   const dir = idx%2===0 ? 1 : -1;
@@ -933,7 +980,7 @@ function renderMainFrame(t, W, H){
   let a=0, nx=null, tr="punch";
   if(inTrans){
     a = (local - (sd - trW)) / trW;
-    nx = media[idx+1];
+    nx = media[realNextIdx];
     if(nx.kind==="vid") syncVideo(nx, 0);
     tr = transSeq[idx] || "punch";
   }
@@ -1024,7 +1071,6 @@ function renderMainFrame(t, W, H){
   }
 
   drawTexts(t, W, H, dur, accent, txtCol, fam);
-  ctx.restore();
 
   if(idx>0 && local < 0.11){
     const fp = 1 - local/0.11;
@@ -1350,40 +1396,49 @@ guardSegToggle(bradySegOn, bradySet, "Brady Bunch grid");
 /* ---------------- film strip reveal segment ---------------- */
 function filmstripDuration(){
   const n = filmstripSet.arr.length;
-  return n ? Math.max(3, Math.min(8, 2 + n*1.1)) : 0;
+  if(!n) return 0;
+  const per = 0.65;
+  return Math.max(1.3, Math.min(9, n*per));
 }
 function drawFilmStrip(lt, W, H){
   ctx.fillStyle = "#0B0B0E"; ctx.fillRect(0,0,W,H);
-  const media2 = filmstripSet.arr, n = media2.length;
-  const dur = filmstripDuration();
-  const p = clamp01(lt/dur);
-  const frameH = H*0.5, bandY = (H-frameH)/2;
-  const frameW = frameH, gap = frameW*0.14;
-  const totalStripW = n*(frameW+gap);
-  const travel = totalStripW + W;
-  const x0 = W - travel*easeInOutQuart(p);
+  const arr = filmstripSet.arr, n = arr.length;
+  const dur = filmstripDuration(), per = dur/n;
+  const idx = Math.min(n-1, Math.floor(lt/per));
+  const local = lt - idx*per;
+  const snapDur = Math.min(0.14, per*0.4);
 
-  for(let i=0;i<n;i++){
-    const fx = x0 + i*(frameW+gap);
-    if(fx+frameW < -20 || fx > W+20) continue;
-    ctx.fillStyle = "#111";
-    ctx.fillRect(fx-6, bandY-6, frameW+12, frameH+12);
-    ctx.save();
-    ctx.beginPath(); ctx.rect(fx, bandY, frameW, frameH); ctx.clip();
-    const el = media2[i].el;
-    const iw = el.naturalWidth||1, ih = el.naturalHeight||1;
-    const s = Math.max(frameW/iw, frameH/ih);
-    const dw = iw*s, dh = ih*s;
-    ctx.drawImage(el, fx+(frameW-dw)/2, bandY+(frameH-dh)/2, dw, dh);
-    ctx.restore();
+  const margin = W*0.11;
+  const frameW = W - margin*2;
+  const frameH = Math.min(H*0.82, frameW*1.28);
+  const cx = W/2, cy = H/2;
+  const dir = idx%2===0 ? 1 : -1;
+  let scrollOffset = 0, blurPx = 0;
+  if(local < snapDur){
+    const p = 1 - local/snapDur;
+    scrollOffset = dir * H * 0.85 * p * p;
+    blurPx = 16 * p;
   }
+  const fx = cx - frameW/2, fy = cy - frameH/2 + scrollOffset;
 
-  const holeR = frameH*0.045, pitch = frameH*0.22;
-  const holeOffset = ((x0 % pitch) + pitch) % pitch;
+  ctx.save();
+  if(blurPx > 0.3) ctx.filter = `blur(${Math.round(blurPx)}px)`;
+  ctx.fillStyle = "#111"; ctx.fillRect(fx-8, fy-8, frameW+16, frameH+16);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(fx, fy, frameW, frameH); ctx.clip();
+  const el = arr[idx].el;
+  const iw = el.naturalWidth||1, ih = el.naturalHeight||1;
+  const s = Math.max(frameW/iw, frameH/ih);
+  const dw = iw*s, dh = ih*s;
+  ctx.drawImage(el, fx+(frameW-dw)/2, fy+(frameH-dh)/2, dw, dh);
+  ctx.restore();
+  ctx.restore();
+
+  const holeR = W*0.017, pitch = holeR*3.6;
   ctx.fillStyle = "#F2EFE6";
-  for(let hx = holeOffset - pitch; hx < W+pitch; hx += pitch){
-    ctx.beginPath(); ctx.ellipse(hx, bandY - frameH*0.09, holeR, holeR*1.3, 0, 0, Math.PI*2); ctx.fill();
-    ctx.beginPath(); ctx.ellipse(hx, bandY + frameH + frameH*0.09, holeR, holeR*1.3, 0, 0, Math.PI*2); ctx.fill();
+  for(let hy = -pitch; hy < H+pitch; hy += pitch){
+    ctx.beginPath(); ctx.ellipse(margin*0.4, hy, holeR, holeR*1.25, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(W-margin*0.4, hy, holeR, holeR*1.25, 0, 0, Math.PI*2); ctx.fill();
   }
   addFilmLook(W,H);
   drawWatermarkYear(W,H);
@@ -1415,7 +1470,7 @@ function drawShuffleSeg(lt, W, H){
 }
 
 /* ---------------- brady bunch grid segment ---------------- */
-function bradyDuration(){ return bradySet.arr.length ? 3.2 : 0; }
+function bradyDuration(){ return bradySet.arr.length ? 6 : 0; }
 function drawBradySeg(lt, W, H){
   ctx.fillStyle = "#0B0B0E"; ctx.fillRect(0,0,W,H);
   const media2 = bradySet.arr, n = Math.min(8, media2.length);
@@ -1522,10 +1577,189 @@ exportBtn.addEventListener("click", async ()=>{
   runTimeline(()=>rec.stop());
 });
 
+/* ---------------- save & resume projects (stored locally on this device) ---------------- */
+function openProjectsDB(){
+  return new Promise((resolve,reject)=>{
+    const req = indexedDB.open("masMotionProjects", 1);
+    req.onupgradeneeded = ()=>{ req.result.createObjectStore("projects", {keyPath:"name"}); };
+    req.onsuccess = ()=>resolve(req.result);
+    req.onerror = ()=>reject(req.error);
+  });
+}
+async function blobFromUrl(url){ return (await fetch(url)).blob(); }
+async function blobsFromSet(set){
+  return Promise.all(set.arr.map(async m=>({blob: await blobFromUrl(m.url)})));
+}
+async function loadImageBlobInto(set, blob){
+  return new Promise(resolve=>{
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = ()=>{ set.arr.push({el:img, url}); resolve(); };
+    img.src = url;
+  });
+}
+
+async function saveProject(name){
+  const project = {
+    name, savedAt: Date.now(),
+    media: await Promise.all(media.map(async m=>({
+      kind:m.kind, blob: await blobFromUrl(m.url), trim:m.trim, dur:m.dur
+    }))),
+    filmstrip: await blobsFromSet(filmstripSet),
+    shuffle: await blobsFromSet(shuffleSet),
+    brady: await blobsFromSet(bradySet),
+    lines: getLines(),
+    settings: {
+      cText:cText.value, cAccent:cAccent.value, cBg:cBg.value, fontSel:fontSel.value,
+      motionSel:motionSel.value, stripeOn:document.getElementById("stripeOn").checked,
+      stripe:currentStripe.slice(),
+      beatSync:beatSyncBox.checked, duration:+durRange.value, aspect:aspectSel.value,
+      watermarkOn:watermarkOn.checked, wmOpacity:+wmOpacity.value,
+      sectionName:sectionName.value, sectionWatermarkOn:sectionWatermarkOn.checked,
+      yearOn:yearOn.checked, yearSel:yearSel.value, endLogoOn:endLogoOn.checked,
+      filmstripSegOn:filmstripSegOn.checked, shuffleSegOn:shuffleSegOn.checked, bradySegOn:bradySegOn.checked,
+      musicStart:musicStartSec()
+    },
+    logoBlob: logoImg ? await blobFromUrl(logoPreview.src) : null,
+    musicBlob: (musicEl && !currentPresetMusicPath) ? await blobFromUrl(musicEl.src) : null,
+    presetMusicPath: currentPresetMusicPath
+  };
+  const db = await openProjectsDB();
+  await new Promise((res,rej)=>{
+    const tx = db.transaction("projects","readwrite");
+    tx.objectStore("projects").put(project);
+    tx.oncomplete = res; tx.onerror = ()=>rej(tx.error);
+  });
+}
+
+async function loadProject(name){
+  const db = await openProjectsDB();
+  const project = await new Promise((res,rej)=>{
+    const tx = db.transaction("projects","readonly");
+    const req = tx.objectStore("projects").get(name);
+    req.onsuccess = ()=>res(req.result); req.onerror = ()=>rej(req.error);
+  });
+  if(!project) throw new Error("not found");
+
+  closeTrim();
+  media.length = 0;
+  filmstripSet.arr.length = 0; shuffleSet.arr.length = 0; bradySet.arr.length = 0;
+  for(const m of project.media){
+    const url = URL.createObjectURL(m.blob);
+    if(m.kind==="img"){
+      await new Promise(res=>{ const el=new Image(); el.onload=()=>{ media.push({kind:"img", el, url}); res(); }; el.src=url; });
+    } else {
+      await new Promise(res=>{
+        const el=document.createElement("video");
+        el.muted=true; el.playsInline=true; el.preload="metadata";
+        el.onloadedmetadata=()=>{ media.push({kind:"vid", el, url, dur:m.dur, trim:m.trim}); res(); };
+        el.src=url;
+      });
+    }
+  }
+  for(const p of project.filmstrip) await loadImageBlobInto(filmstripSet, p.blob);
+  for(const p of project.shuffle) await loadImageBlobInto(shuffleSet, p.blob);
+  for(const p of project.brady) await loadImageBlobInto(bradySet, p.blob);
+
+  textLines.innerHTML = "";
+  (project.lines.length ? project.lines : ["",""]).forEach(l=>addTextLine(l));
+
+  const s = project.settings;
+  cText.value = s.cText; cAccent.value = s.cAccent; cBg.value = s.cBg;
+  fontSel.value = s.fontSel; motionSel.value = s.motionSel;
+  document.getElementById("stripeOn").checked = s.stripeOn;
+  currentStripe = s.stripe.slice();
+  beatSyncBox.checked = s.beatSync;
+  durRange.value = s.duration; durLabel.textContent = s.duration+"s";
+  aspectSel.value = s.aspect; setAspect();
+  watermarkOn.checked = s.watermarkOn; watermarkOpts.style.display = s.watermarkOn ? "block" : "none";
+  wmOpacity.value = s.wmOpacity;
+  sectionName.value = s.sectionName; sectionWatermarkOn.checked = s.sectionWatermarkOn;
+  yearOn.checked = s.yearOn; yearOpts.style.display = s.yearOn ? "block" : "none"; yearSel.value = s.yearSel;
+  endLogoOn.checked = s.endLogoOn; endLogoHint.style.display = s.endLogoOn ? "block" : "none";
+  filmstripSegOn.checked = s.filmstripSegOn; shuffleSegOn.checked = s.shuffleSegOn; bradySegOn.checked = s.bradySegOn;
+
+  if(project.logoBlob){
+    const url = URL.createObjectURL(project.logoBlob);
+    await new Promise(res=>{
+      const img = new Image();
+      img.onload = ()=>{ logoImg=img; logoPreview.src=url; logoPreviewWrap.style.display="flex"; res(); };
+      img.src = url;
+    });
+  } else {
+    logoImg = null; logoPreviewWrap.style.display = "none";
+  }
+
+  if(project.presetMusicPath){
+    presetMusicSel.value = project.presetMusicPath;
+    currentPresetMusicPath = project.presetMusicPath;
+    await loadMusicFromFile(await blobFromUrl(project.presetMusicPath));
+    musicStartRange.value = s.musicStart; musicStartLabel.textContent = Math.round(s.musicStart)+"s";
+  } else if(project.musicBlob){
+    presetMusicSel.value = ""; currentPresetMusicPath = null;
+    await loadMusicFromFile(project.musicBlob);
+    musicStartRange.value = s.musicStart; musicStartLabel.textContent = Math.round(s.musicStart)+"s";
+  } else {
+    musicEl = null; musicStatus.textContent = "";
+  }
+
+  renderThumbs(); filmstripSet.render(); shuffleSet.render(); bradySet.render();
+  repaintIdle();
+}
+
+const projectSel = document.getElementById("projectSel");
+async function refreshProjectList(){
+  const db = await openProjectsDB();
+  const names = await new Promise((res,rej)=>{
+    const tx = db.transaction("projects","readonly");
+    const req = tx.objectStore("projects").getAllKeys();
+    req.onsuccess = ()=>res(req.result); req.onerror = ()=>rej(req.error);
+  });
+  projectSel.innerHTML = "";
+  if(!names.length){ projectSel.innerHTML = `<option value="">— no saved projects yet —</option>`; return; }
+  names.forEach(n=>{ const o=document.createElement("option"); o.value=o.textContent=n; projectSel.appendChild(o); });
+}
+document.getElementById("saveProjectBtn").addEventListener("click", async ()=>{
+  const name = prompt("Name this project (e.g. Fancy Sailors 2026):");
+  if(!name) return;
+  statusEl.textContent = "Saving project…";
+  try{
+    await saveProject(name);
+    await refreshProjectList();
+    projectSel.value = name;
+    statusEl.innerHTML = `Project <b>${name}</b> saved on this device. Come back any time and hit Load.`;
+  }catch(e){
+    statusEl.textContent = "Couldn't save the project — this browser's storage might be full.";
+  }
+});
+document.getElementById("loadProject").addEventListener("click", async ()=>{
+  const name = projectSel.value; if(!name) return;
+  statusEl.textContent = "Loading project…";
+  try{
+    await loadProject(name);
+    statusEl.innerHTML = `Project <b>${name}</b> loaded.`;
+  }catch(e){
+    statusEl.textContent = "Couldn't load that project.";
+  }
+});
+document.getElementById("deleteProject").addEventListener("click", async ()=>{
+  const name = projectSel.value; if(!name) return;
+  if(!confirm(`Delete saved project "${name}"? This can't be undone.`)) return;
+  const db = await openProjectsDB();
+  await new Promise((res,rej)=>{
+    const tx = db.transaction("projects","readwrite");
+    tx.objectStore("projects").delete(name);
+    tx.oncomplete = res; tx.onerror = ()=>rej(tx.error);
+  });
+  await refreshProjectList();
+  statusEl.textContent = `Project "${name}" deleted.`;
+});
+
 /* ---------------- init ---------------- */
 drawHeaderStripe();
 fillPresetSelect();
 applyTemplate("Girly Carnival");
+refreshProjectList();
 document.fonts.ready.then(repaintIdle);
 </script>
 </body>
