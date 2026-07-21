@@ -496,7 +496,7 @@ function addFiles(list){
     const isVid = f.type.startsWith("video/") || /\.(mp4|mov|webm|m4v|3gp)$/i.test(f.name);
     if(f.type.startsWith("image/")){
       const el = new Image(); el.src = url;
-      el.onload = ()=>{ media.push({kind:"img", el, url}); renderThumbs(); repaintIdle(); };
+      el.onload = ()=>{ media.push({kind:"img", el, url}); renderThumbs(); repaintIdle(); scheduleAutosave(); };
       el.onerror = ()=>{ statusEl.innerHTML = `Couldn't read image <b>${f.name}</b>.`; };
     } else if(isVid){
       const el = document.createElement("video");
@@ -506,7 +506,7 @@ function addFiles(list){
         if(done) return; done = true;
         const dur = (el.duration && isFinite(el.duration)) ? el.duration : 3;
         media.push({kind:"vid", el, url, dur, trim:{start:0, len:Math.min(3, dur)}});
-        renderThumbs(); repaintIdle();
+        renderThumbs(); repaintIdle(); scheduleAutosave();
       };
       el.onerror = ()=>{
         if(done) return; done = true;
@@ -544,7 +544,7 @@ function renderThumbs(){
     if(a==="up" && i>0) [media[i-1],media[i]]=[media[i],media[i-1]];
     if(a==="dn" && i<media.length-1) [media[i+1],media[i]]=[media[i],media[i+1]];
     if(a==="cut"){ openTrim(i); return; }
-    renderThumbs(); repaintIdle();
+    renderThumbs(); repaintIdle(); scheduleAutosave();
   }));
   statusEl.textContent = media.length ? `${media.length} slide${media.length>1?"s":""} loaded.` : "Add media to begin.";
 }
@@ -576,8 +576,8 @@ function updateTrimReadout(){
 trimStart.addEventListener("input", ()=>{ updateTrimReadout();
   const m = media[trimIndex]; if(m){ m.el.currentTime = m.trim.start; }
 });
-trimLen.addEventListener("change", ()=>{ updateTrimReadout(); renderThumbs(); document.querySelectorAll(".thumb")[trimIndex]?.classList.add("trimming"); });
-document.getElementById("trimClose").addEventListener("click", closeTrim);
+trimLen.addEventListener("change", ()=>{ updateTrimReadout(); renderThumbs(); document.querySelectorAll(".thumb")[trimIndex]?.classList.add("trimming"); scheduleAutosave(); });
+document.getElementById("trimClose").addEventListener("click", ()=>{ closeTrim(); scheduleAutosave(); });
 document.getElementById("trimPreview").addEventListener("click", ()=>{
   if(trimIndex<0) return;
   const m = media[trimIndex];
@@ -876,8 +876,35 @@ function buildRunPlan(force=false){
 }
 
 /* ---------------- drawing ---------------- */
+/* Phone browsers can only decode a couple of <video> elements at once. When a clip
+   isn't decoded yet (just became active, or the decoder was reclaimed) drawing it puts
+   a black/garbage frame on screen. To avoid that we keep a snapshot of each video's last
+   good frame and draw THAT whenever the live element isn't ready — so a clip that's still
+   waking up shows its held frame instead of black, and the reel never flashes black. */
+let __frameToken = 0;
+function snapshotVideo(el){
+  if(!el || el.tagName!=="VIDEO") return;
+  if(el.readyState < 2 || !el.videoWidth) return;
+  if(el._snapTok === __frameToken) return;   // once per rendered frame is plenty
+  el._snapTok = __frameToken;
+  let c = el._lastFrame;
+  if(!c){ c = document.createElement("canvas"); el._lastFrame = c; }
+  const maxSide = 960;
+  const sc = Math.min(1, maxSide/Math.max(el.videoWidth, el.videoHeight));
+  const w = Math.max(1,Math.round(el.videoWidth*sc)), h = Math.max(1,Math.round(el.videoHeight*sc));
+  if(c.width!==w) c.width=w; if(c.height!==h) c.height=h;
+  try{ c.getContext("2d").drawImage(el,0,0,w,h); el._hasFrame=true; }catch(e){}
+}
+function drawableSource(el){
+  if(el && el.tagName==="VIDEO"){
+    if(el.readyState>=2 && el.videoWidth){ snapshotVideo(el); return el; }
+    if(el._hasFrame && el._lastFrame) return el._lastFrame; // hold last good frame, never black
+  }
+  return el;
+}
 function coverDraw(el, W, H, scale=1, dx=0, dy=0, alpha=1){
-  const iw = el.videoWidth || el.naturalWidth, ih = el.videoHeight || el.naturalHeight;
+  el = drawableSource(el);
+  const iw = el.videoWidth || el.naturalWidth || el.width, ih = el.videoHeight || el.naturalHeight || el.height;
   if(!iw || !ih) return;
   const s = Math.max(W/iw, H/ih) * scale;
   const dw = iw*s, dh = ih*s;
@@ -918,9 +945,10 @@ function easeOutBounce(p){
 const off = document.createElement("canvas");
 const offCtx = off.getContext("2d");
 function drawToOff(el, W, H, scale){
+  el = drawableSource(el);
   if(off.width!==W || off.height!==H){ off.width=W; off.height=H; }
   offCtx.clearRect(0,0,W,H);
-  const iw = el.videoWidth || el.naturalWidth, ih = el.videoHeight || el.naturalHeight;
+  const iw = el.videoWidth || el.naturalWidth || el.width, ih = el.videoHeight || el.naturalHeight || el.height;
   if(!iw || !ih) return;
   const s = Math.max(W/iw, H/ih)*scale, dw = iw*s, dh = ih*s;
   offCtx.drawImage(el, (W-dw)/2, (H-dh)/2, dw, dh);
@@ -969,31 +997,35 @@ function syncVideo(m, offset){
     try{ v.currentTime = m.trim.start; }catch(e){}
   }
 }
-/* Pre-seek + pre-buffer every clip to its trim point before the run starts, so nothing
-   has to cold-buffer for the first time right as it's needed mid-timeline/transition.
-   Clips stay on lightweight preload="metadata" while you're editing (so adding several
-   videos at once doesn't force the browser to fully download all of them at the same
-   time) — the full buffering only happens here, scoped to just the clips in the project,
-   right before a preview or export run. Every wait is capped so a clip that never fires
-   its event can't stall the whole run. */
+/* Prepare ONLY the first clip before the run starts. Phone browsers can only decode a
+   couple of videos at once, so priming every clip up front (what this used to do) simply
+   exhausted the decoder pool — the 1st clip would grab a decoder, the 2nd would stutter,
+   the 3rd would come up black. Every later clip is instead woken ~0.6s before it's needed
+   (see renderMainFrame), so at most the current + next clip ever decode at the same time.
+   The wait is capped so a clip that never signals ready can't stall the whole run. */
 async function primeVideos(){
-  const vids = media.filter(m=>m.kind==="vid");
-  await Promise.all(vids.map(async m=>{
+  const order = runOrder.length===media.length ? runOrder : media.map((_,i)=>i);
+  const first = media[order[0]];
+  // make sure nothing else is holding a decoder
+  media.forEach(m=>{ if(m.kind==="vid" && m.el!==(first&&first.el)) { try{ m.el.pause(); }catch(e){} } });
+  if(first && first.kind==="vid"){
     try{
-      m.el.pause();
-      m.el.preload = "auto";
-      await Promise.race([seekTo(m.el, m.trim.start), new Promise(res=>setTimeout(res, 3000))]);
-      if(m.el.readyState < 3){
+      first.el.pause();
+      first.el.preload = "auto";
+      await Promise.race([seekTo(first.el, first.trim.start), new Promise(res=>setTimeout(res, 2500))]);
+      if(first.el.readyState < 2){
         await Promise.race([
-          new Promise(res=>{ const h=()=>{ m.el.removeEventListener("canplay", h); res(); }; m.el.addEventListener("canplay", h); }),
-          new Promise(res=>setTimeout(res, 2500))
+          new Promise(res=>{ const h=()=>{ first.el.removeEventListener("canplay", h); res(); }; first.el.addEventListener("canplay", h); }),
+          new Promise(res=>setTimeout(res, 2000))
         ]);
       }
+      snapshotVideo(first.el);
     }catch(e){}
-  }));
+  }
 }
 
 function renderFrame(t){
+  __frameToken++;
   const W = cv.width, H = cv.height;
   const mainDur = +durRange.value;
   if(t < mainDur){ renderMainFrame(t, W, H); return; }
@@ -1023,7 +1055,16 @@ function renderMainFrame(t, W, H){
 
   media.forEach((m,i)=>{
     if(m.kind!=="vid") return;
-    if(i===realIdx || (i===realNextIdx && local > sd - 0.6)) return;
+    const isCur = i===realIdx;
+    const isNextSoon = i===realNextIdx && local > sd - 0.6;
+    if(isCur){ return; }
+    if(isNextSoon){
+      // Wake the next clip ~0.6s before its transition so it's actually decoded (and we've
+      // captured a frame of it) by the time it slides in — otherwise it flashes black.
+      if(m.el.paused){ try{ m.el.currentTime = m.trim.start; m.el.play().catch(()=>{}); }catch(e){} }
+      snapshotVideo(m.el);
+      return;
+    }
     if(!m.el.paused) m.el.pause();
   });
 
@@ -1439,7 +1480,7 @@ function makePhotoSet(prefix, {cap=Infinity} = {}){
       queued++;
       const url = URL.createObjectURL(f);
       const img = new Image();
-      img.onload = ()=>{ if(arr.length < cap) arr.push({el:img, url}); render(); repaintIdle(); };
+      img.onload = ()=>{ if(arr.length < cap) arr.push({el:img, url}); render(); repaintIdle(); scheduleAutosave(); };
       img.onerror = ()=>{ statusEl.innerHTML = `Couldn't read image <b>${f.name}</b>.`; };
       img.src = url;
     });
@@ -1462,7 +1503,7 @@ function makePhotoSet(prefix, {cap=Infinity} = {}){
       if(a==="del") arr.splice(i,1);
       if(a==="up" && i>0) [arr[i-1],arr[i]] = [arr[i],arr[i-1]];
       if(a==="dn" && i<arr.length-1) [arr[i+1],arr[i]] = [arr[i],arr[i+1]];
-      render(); repaintIdle();
+      render(); repaintIdle(); scheduleAutosave();
     }));
   }
   return {arr, render};
@@ -1481,7 +1522,7 @@ function guardSegToggle(box, set, label){
       statusEl.textContent = `Add at least one photo to the ${label} set first.`;
       return;
     }
-    repaintIdle();
+    repaintIdle(); scheduleAutosave();
   });
 }
 guardSegToggle(filmstripSegOn, filmstripSet, "film strip");
@@ -1494,68 +1535,69 @@ guardSegToggle(bradySegOn, bradySet, "Brady Bunch grid");
 function filmstripDuration(){
   const n = filmstripSet.arr.length;
   if(!n) return 0;
-  const per = 1.1;
-  return Math.max(2.2, Math.min(11, n*per));
+  const per = 1.0;
+  return Math.max(2.0, Math.min(11, (n+1)*per));
 }
+/* A real film strip: several frames stacked in a vertical column with sprocket holes down
+   both edges. The whole strip scrolls upward, speeding between frames (motion-blurred) and
+   settling so the current frame lands dead-centre — with the frame above and below it also
+   visible, so 2–3 photos are on screen stacked at once. */
 function drawFilmStrip(lt, W, H){
   ctx.fillStyle = "#0B0B0E"; ctx.fillRect(0,0,W,H);
   const arr = filmstripSet.arr, n = arr.length;
+  if(!n){ addFilmLook(W,H); drawWatermarkYear(W,H); drawSticker(W,H); return; }
   const dur = filmstripDuration(), per = dur/n;
-  const idx = Math.min(n-1, Math.floor(lt/per));
-  const local = lt - idx*per;
-  const rushDur = Math.min(0.55, per*0.6);
 
-  const margin = W*0.11;
+  const margin = W*0.14;
   const frameW = W - margin*2;
-  const frameH = Math.min(H*0.82, frameW*1.28);
-  const cx = W/2, cy = H/2;
-  const dir = idx%2===0 ? 1 : -1;
+  const frameH = frameW*1.12;                 // each cell
+  const gap = H*0.028;
+  const cell = frameH + gap;                  // centre-to-centre spacing
+  const cx = W/2, centerY = H/2;
 
-  let scrollOffset = 0, blurPx = 0, rushZoom = 0;
-  if(local < rushDur){
-    const rp = 1 - local/rushDur;              // 1 -> 0 as it speeds in and lands
-    const e = easeOutQuint(1-rp);               // fast start, decelerating landing
-    scrollOffset = dir * H * 0.95 * (1-e);
-    blurPx = 24 * (1-e);
-    rushZoom = 0.35 * (1-e);
-  }
-  const holdP = clamp01((local - rushDur) / Math.max(0.001, per - rushDur));
-  const creepZoom = 0.06 * holdP;               // slow Ken-Burns creep while landed, never dead-static
-
-  const fx = cx - frameW/2, fy = cy - frameH/2 + scrollOffset;
+  // eased scroll position measured in cells. Within each step it advances fast then holds,
+  // so every frame gets a moment landed in the centre.
+  const rawIdx = lt/per;                       // 0 .. n
+  const i = Math.min(n-1, Math.floor(rawIdx));
+  const frac = clamp01(rawIdx - i);
+  const settle = easeOutQuint(clamp01(frac/0.5));   // reach next frame in first half of the step
+  const scrollCells = i + settle;
+  const moving = 1 - settle;                        // 1 while flying, 0 while landed
+  const blurPx = 20 * moving;
 
   ctx.save();
-  if(blurPx > 0.3) ctx.filter = `blur(${Math.round(blurPx)}px)`;
-  ctx.fillStyle = "#111"; ctx.fillRect(fx-8, fy-8, frameW+16, frameH+16);
-  ctx.save();
-  ctx.beginPath(); ctx.rect(fx, fy, frameW, frameH); ctx.clip();
-  const el = arr[idx].el;
-  const iw = el.naturalWidth||1, ih = el.naturalHeight||1;
-  const s = Math.max(frameW/iw, frameH/ih) * (1 + rushZoom + creepZoom);
-  const dw = iw*s, dh = ih*s;
-  ctx.drawImage(el, fx+(frameW-dw)/2, fy+(frameH-dh)/2, dw, dh);
-  ctx.restore();
-  ctx.restore();
-
-  if(blurPx > 1.5){
+  if(blurPx > 0.4) ctx.filter = `blur(${Math.round(blurPx)}px)`;
+  // draw the current cell plus its neighbours above/below (stacked)
+  for(let k=i-2; k<=i+2; k++){
+    if(k<0 || k>=n) continue;
+    const cellCenterY = centerY + (k - scrollCells)*cell;
+    if(cellCenterY < -cell || cellCenterY > H+cell) continue;
+    const fx = cx - frameW/2, fy = cellCenterY - frameH/2;
+    ctx.fillStyle = "#151515"; ctx.fillRect(fx-10, fy-gap*0.4, frameW+20, frameH+gap*0.8);
     ctx.save();
-    ctx.globalAlpha = clamp01(blurPx/24) * 0.4;
-    ctx.globalCompositeOperation = "screen";
-    const streakGrad = dir>0
-      ? ctx.createLinearGradient(0, fy-H*0.4, 0, fy)
-      : ctx.createLinearGradient(0, fy+frameH, 0, fy+frameH+H*0.4);
-    streakGrad.addColorStop(0, "rgba(255,255,255,0)");
-    streakGrad.addColorStop(1, "rgba(255,255,255,.6)");
-    ctx.fillStyle = streakGrad;
-    ctx.fillRect(fx-8, dir>0 ? fy-H*0.4 : fy+frameH, frameW+16, H*0.4);
+    ctx.beginPath(); ctx.rect(fx, fy, frameW, frameH); ctx.clip();
+    const el = arr[k].el;
+    const iw = el.naturalWidth||1, ih = el.naturalHeight||1;
+    const s = Math.max(frameW/iw, frameH/ih);
+    const dw = iw*s, dh = ih*s;
+    ctx.drawImage(el, fx+(frameW-dw)/2, fy+(frameH-dh)/2, dw, dh);
     ctx.restore();
+    // subtle dim on the off-centre neighbours so the centred frame reads as the focus
+    const off = Math.abs(cellCenterY - centerY) / cell;
+    if(off > 0.15){
+      ctx.save(); ctx.globalAlpha = Math.min(0.55, (off-0.15)*0.7);
+      ctx.fillStyle = "#000"; ctx.fillRect(fx, fy, frameW, frameH); ctx.restore();
+    }
   }
+  ctx.restore();
 
-  const holeR = W*0.017, pitch = holeR*3.6;
-  ctx.fillStyle = "#F2EFE6";
-  for(let hy = -pitch; hy < H+pitch; hy += pitch){
-    ctx.beginPath(); ctx.ellipse(margin*0.4, hy, holeR, holeR*1.25, 0, 0, Math.PI*2); ctx.fill();
-    ctx.beginPath(); ctx.ellipse(W-margin*0.4, hy, holeR, holeR*1.25, 0, 0, Math.PI*2); ctx.fill();
+  // sprocket holes down both edges, scrolling along with the film
+  const holeR = W*0.015, pitch = holeR*3.4;
+  const holeShift = (scrollCells*cell) % pitch;
+  ctx.fillStyle = "#EDE7D6";
+  for(let hy = -pitch - holeShift; hy < H+pitch; hy += pitch){
+    ctx.beginPath(); ctx.ellipse(margin*0.5, hy, holeR, holeR*1.3, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(W-margin*0.5, hy, holeR, holeR*1.3, 0, 0, Math.PI*2); ctx.fill();
   }
   addFilmLook(W,H);
   drawWatermarkYear(W,H);
@@ -1727,62 +1769,16 @@ async function loadImageBlobInto(set, blob){
   });
 }
 
-/* Saving used to store each video's entire original file, even though only a few trimmed
-   seconds ever get used — a handful of real phone clips easily blows past IndexedDB's
-   storage quota and makes the whole save fail. Re-encode just the trimmed window (at a
-   sane bitrate, since it only ever gets redrawn into the export canvas anyway) instead. */
-async function extractTrimmedClip(m){
-  return new Promise(resolve=>{
-    try{
-      const v = m.el;
-      const w = v.videoWidth || 640, h = v.videoHeight || 360;
-      const off = document.createElement("canvas");
-      off.width = w; off.height = h;
-      const octx = off.getContext("2d");
-      const stream = off.captureStream(30);
-      const mime = ["video/mp4","video/webm;codecs=vp9","video/webm"].find(t=>MediaRecorder.isTypeSupported(t)) || "";
-      const rec = new MediaRecorder(stream, mime ? {mimeType:mime, videoBitsPerSecond:6_000_000} : {});
-      const chunks = [];
-      rec.ondataavailable = e=>{ if(e.data.size) chunks.push(e.data); };
-      rec.onstop = ()=> resolve(chunks.length ? new Blob(chunks, {type: mime||"video/webm"}) : null);
-      rec.onerror = ()=>{ try{ rec.stop(); }catch(e){} };
-
-      let raf = null, finished = false;
-      const endAt = m.trim.start + m.trim.len;
-      const finish = ()=>{
-        if(finished) return; finished = true;
-        if(raf) cancelAnimationFrame(raf);
-        v.pause();
-        try{ rec.stop(); }catch(e){ resolve(null); }
-      };
-      function draw(){
-        octx.drawImage(v, 0, 0, w, h);
-        if(v.currentTime >= endAt - 0.02 || v.ended){ finish(); return; }
-        raf = requestAnimationFrame(draw);
-      }
-      const onSeeked = ()=>{
-        v.removeEventListener("seeked", onSeeked);
-        rec.start();
-        v.play().then(draw).catch(()=>{ finish(); });
-      };
-      v.addEventListener("seeked", onSeeked);
-      v.pause();
-      v.currentTime = m.trim.start;
-      setTimeout(finish, m.trim.len*1000 + 4000); // absolute safety net
-    }catch(e){ resolve(null); }
-  });
-}
-async function videoSavePayload(m){
-  const trimmed = await extractTrimmedClip(m);
-  if(trimmed) return { kind:"vid", blob: trimmed, trim:{start:0, len:m.trim.len}, dur:m.trim.len };
-  return { kind:"vid", blob: await blobFromUrl(m.url), trim:m.trim, dur:m.dur }; // fallback: full clip
-}
-
-async function saveProject(name){
-  const project = {
+/* Store the ORIGINAL uploaded files, untouched — no re-encoding, no quality loss. (The
+   previous version re-compressed every clip on save; that's now gone, so what you get back
+   is exactly what you put in.) */
+async function buildProjectRecord(name){
+  return {
     name, savedAt: Date.now(),
     media: await Promise.all(media.map(async m=>
-      m.kind==="vid" ? videoSavePayload(m) : {kind:"img", blob: await blobFromUrl(m.url)}
+      m.kind==="vid"
+        ? { kind:"vid", blob: await blobFromUrl(m.url), trim:m.trim, dur:m.dur }
+        : { kind:"img", blob: await blobFromUrl(m.url) }
     )),
     filmstrip: await blobsFromSet(filmstripSet),
     shuffle: await blobsFromSet(shuffleSet),
@@ -1804,23 +1800,52 @@ async function saveProject(name){
     musicBlob: (musicEl && !currentPresetMusicPath) ? await blobFromUrl(musicEl.src) : null,
     presetMusicPath: currentPresetMusicPath
   };
+}
+async function writeRecord(record){
   const db = await openProjectsDB();
   await new Promise((res,rej)=>{
     const tx = db.transaction("projects","readwrite");
-    tx.objectStore("projects").put(project);
+    tx.objectStore("projects").put(record);
     tx.oncomplete = res; tx.onerror = ()=>rej(tx.error);
   });
 }
-
-async function loadProject(name){
+async function readRecord(name){
   const db = await openProjectsDB();
-  const project = await new Promise((res,rej)=>{
+  return new Promise((res,rej)=>{
     const tx = db.transaction("projects","readonly");
     const req = tx.objectStore("projects").get(name);
     req.onsuccess = ()=>res(req.result); req.onerror = ()=>rej(req.error);
   });
-  if(!project) throw new Error("not found");
+}
+async function saveProject(name){ await writeRecord(await buildProjectRecord(name)); }
 
+/* ---------- auto-save: your work survives a refresh with nothing to click ---------- */
+const AUTOSAVE_KEY = "__autosave__";
+let autosaveTimer = null, autosaveBusy = false, autosaveReady = false;
+function scheduleAutosave(delay=1200){
+  if(!autosaveReady) return; // don't fire while a project is still being restored/loaded
+  clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(runAutosave, delay);
+}
+async function runAutosave(){
+  if(!autosaveReady) return;
+  if(autosaveBusy){ scheduleAutosave(800); return; }
+  const anything = media.length || filmstripSet.arr.length || shuffleSet.arr.length || bradySet.arr.length;
+  if(!anything) return;
+  autosaveBusy = true;
+  try{
+    await writeRecord(await buildProjectRecord(AUTOSAVE_KEY));
+  }catch(e){ /* quota or transient: keep quiet, the manual Save button surfaces real errors */ }
+  finally{ autosaveBusy = false; }
+}
+
+async function loadProject(name){
+  const project = await readRecord(name);
+  if(!project) throw new Error("not found");
+  await applyProjectRecord(project);
+}
+async function applyProjectRecord(project){
+  autosaveReady = false;         // don't let autosave fire on our own restore writes
   closeTrim();
   lastRunPlanSig = null; runOrder = [];
   media.length = 0;
@@ -1896,6 +1921,7 @@ async function loadProject(name){
 
   renderThumbs(); filmstripSet.render(); shuffleSet.render(); bradySet.render();
   repaintIdle();
+  autosaveReady = true;
 }
 
 const projectSel = document.getElementById("projectSel");
@@ -1906,22 +1932,22 @@ async function refreshProjectList(){
     const req = tx.objectStore("projects").getAllKeys();
     req.onsuccess = ()=>res(req.result); req.onerror = ()=>rej(req.error);
   });
+  const visible = names.filter(n=> n !== AUTOSAVE_KEY);
   projectSel.innerHTML = "";
-  if(!names.length){ projectSel.innerHTML = `<option value="">— no saved projects yet —</option>`; return; }
-  names.forEach(n=>{ const o=document.createElement("option"); o.value=o.textContent=n; projectSel.appendChild(o); });
+  if(!visible.length){ projectSel.innerHTML = `<option value="">— no saved projects yet —</option>`; return; }
+  visible.forEach(n=>{ const o=document.createElement("option"); o.value=o.textContent=n; projectSel.appendChild(o); });
 }
 document.getElementById("saveProjectBtn").addEventListener("click", async ()=>{
   const name = prompt("Name this project (e.g. Fancy Sailors 2026):");
   if(!name) return;
-  const hasVideo = media.some(m=>m.kind==="vid");
-  statusEl.textContent = hasVideo ? "Saving project… compacting video clips, this can take a few seconds." : "Saving project…";
+  statusEl.textContent = "Saving project…";
   try{
     await saveProject(name);
     await refreshProjectList();
     projectSel.value = name;
     statusEl.innerHTML = `Project <b>${name}</b> saved on this device. Come back any time and hit Load.`;
   }catch(e){
-    statusEl.textContent = "Couldn't save the project — this browser's storage might be full" + (e && e.message ? ` (${e.message})` : "") + ". Try removing a clip or two, or trimming clips shorter, then save again.";
+    statusEl.textContent = "Couldn't save the project — this browser's storage might be full" + (e && e.message ? ` (${e.message})` : "") + ". Try removing a clip or two, then save again.";
   }
 });
 document.getElementById("loadProject").addEventListener("click", async ()=>{
@@ -1953,6 +1979,27 @@ fillPresetSelect();
 applyTemplate("Girly Carnival");
 refreshProjectList();
 document.fonts.ready.then(repaintIdle);
+
+/* Bring back whatever you were last working on — photos, clips, words and settings —
+   so a refresh never wipes your uploads. */
+(async function restoreLastSession(){
+  try{
+    const rec = await readRecord(AUTOSAVE_KEY);
+    const has = rec && rec.media && (rec.media.length ||
+      (rec.filmstrip&&rec.filmstrip.length) || (rec.shuffle&&rec.shuffle.length) || (rec.brady&&rec.brady.length));
+    if(has){
+      await applyProjectRecord(rec);
+      statusEl.innerHTML = "Picked up right where you left off — your photos, clips and settings are back.";
+    } else {
+      autosaveReady = true;
+    }
+  }catch(e){ autosaveReady = true; }
+})();
+
+/* Best-effort catch-all: also stash the current state when you leave/switch away, so
+   even changes that don't individually trigger a save aren't lost. */
+window.addEventListener("pagehide", ()=>{ try{ runAutosave(); }catch(e){} });
+document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="hidden"){ try{ runAutosave(); }catch(e){} } });
 </script>
 </body>
 </html>
