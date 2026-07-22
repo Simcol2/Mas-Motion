@@ -190,6 +190,44 @@
       <button id="deleteProject" title="Delete this project">Delete</button>
     </div>
   </section>
+
+  <section class="panel" style="border-top-color:var(--blue); margin-top:16px;">
+    <h2 style="color:var(--blue)">☁ Save to Google Drive</h2>
+    <p class="hint" style="margin:0 0 10px">Back up whole projects to your Google Drive so they're never limited by this phone's storage, and you can pick them up on any device.</p>
+    <div id="gdSetup">
+      <label for="gdClientId">Google sign-in key (Client ID) — one-time setup</label>
+      <input type="text" id="gdClientId" placeholder="…apps.googleusercontent.com" autocomplete="off">
+      <p class="hint" id="gdSetupHelp" style="margin:6px 0 0">Don't have one yet? Tap “How to set this up” below — it takes about 5 minutes and is free.</p>
+      <div class="btnrow" style="margin-top:10px;">
+        <button class="smallbtn" id="gdHelpBtn">How to set this up</button>
+        <button class="smallbtn gold" id="gdConnect">Connect Google Drive</button>
+      </div>
+    </div>
+    <div id="gdConnected" style="display:none;">
+      <p class="music-status" id="gdStatus" style="color:var(--blue);"></p>
+      <div class="btnrow" style="margin-top:6px;">
+        <button class="smallbtn gold" id="gdSave">⬆ Save to Drive</button>
+        <button class="smallbtn" id="gdDisconnect" style="flex:none; padding:8px 12px;">Sign out</button>
+      </div>
+      <label for="gdProjectSel" style="margin-top:10px;">Your Drive projects</label>
+      <div class="preset-row">
+        <select id="gdProjectSel"><option value="">— none yet —</option></select>
+        <button id="gdLoad" title="Load from Drive">Load</button>
+        <button id="gdDelete" title="Delete from Drive">Delete</button>
+      </div>
+    </div>
+    <div id="gdHelp" style="display:none; margin-top:12px; border:1.5px solid var(--line); border-radius:12px; padding:12px; background:#F4FAFE;">
+      <p class="hint" style="margin:0 0 8px"><b>One-time setup (free):</b></p>
+      <ol class="hint" style="margin:0; padding-left:18px; line-height:1.8;">
+        <li>Go to <b>console.cloud.google.com</b> and make a project (any name).</li>
+        <li>Search “<b>Google Drive API</b>” and click <b>Enable</b>.</li>
+        <li>Open <b>APIs &amp; Services → OAuth consent screen</b>, choose <b>External</b>, fill the app name + your email, and add yourself as a <b>Test user</b>.</li>
+        <li>Open <b>Credentials → Create credentials → OAuth client ID → Web application</b>.</li>
+        <li>Under <b>Authorised JavaScript origins</b> add this exact site: <b id="gdOrigin"></b></li>
+        <li>Create it, copy the <b>Client ID</b> (ends in <b>.apps.googleusercontent.com</b>), and paste it in the box above.</li>
+      </ol>
+    </div>
+  </section>
 </div>
 
 <main>
@@ -470,7 +508,7 @@ function drawHeaderStripe(){
 /* ---------------- built-in video templates (style the VIDEO only) -------- */
 const BUILT_IN = {
   "Girly Carnival":           {text:"#FFFFFF", accent:"#FF2E93", bg:"#FFFFFF", font:"Unbounded", motion:"shuffle", stripe:["#1E90D6","#FF2E93","#3FE0D0","#FFD31D"], beatSync:true},
-  "Black Stars ’26 (Ghana)":  {text:"#FFFFFF", accent:"#FCD116", bg:"#111111", font:"Unbounded", motion:"shuffle", stripe:["#CE1126","#FCD116","#006B3F","#000000"], beatSync:true},
+  "Black Stars ’26 (Ghana)":  {text:"#241E3F", accent:"#FCD116", bg:"#FFFFFF", font:"Unbounded", motion:"shuffle", stripe:["#CE1126","#FCD116","#006B3F","#241E3F"], beatSync:true},
   "Haiti":                    {text:"#FFFFFF", accent:"#F1B517", bg:"#00209F", font:"Unbounded", motion:"punch", stripe:["#00209F","#D21034","#F1B517"], beatSync:true},
   "Trinidad & Tobago":        {text:"#FFFFFF", accent:"#DA1A35", bg:"#FFFFFF", font:"Archivo Black", motion:"glitch", stripe:["#DA1A35","#FFFFFF","#000000"], beatSync:true},
   "Jamaica":                  {text:"#FFFFFF", accent:"#FED100", bg:"#FFFFFF", font:"Archivo Black", motion:"whip", stripe:["#009B3A","#FED100","#000000"], beatSync:true}
@@ -1932,7 +1970,7 @@ function filmstripDuration(){
    settling so the current frame lands dead-centre — with the frame above and below it also
    visible, so 2–3 photos are on screen stacked at once. */
 function drawFilmStrip(lt, W, H){
-  ctx.fillStyle = "#0B0B0E"; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = cBg.value; ctx.fillRect(0,0,W,H);
   const arr = filmstripSet.arr, n = arr.length;
   if(!n){ addFilmLook(W,H); drawWatermarkYear(W,H); drawSticker(W,H); return; }
   const dur = filmstripDuration(), per = dur/n;
@@ -1980,10 +2018,10 @@ function drawFilmStrip(lt, W, H){
   }
   ctx.restore();
 
-  // sprocket holes down both edges, scrolling along with the film
+  // sprocket holes down both edges, scrolling along with the film (contrast with the backdrop)
   const holeR = W*0.015, pitch = holeR*3.4;
   const holeShift = (scrollCells*cell) % pitch;
-  ctx.fillStyle = "#EDE7D6";
+  ctx.fillStyle = isLightColor(cBg.value) ? "#241E3F" : "#EDE7D6";
   for(let hy = -pitch - holeShift; hy < H+pitch; hy += pitch){
     ctx.beginPath(); ctx.ellipse(margin*0.5, hy, holeR, holeR*1.3, 0, 0, Math.PI*2); ctx.fill();
     ctx.beginPath(); ctx.ellipse(W-margin*0.5, hy, holeR, holeR*1.3, 0, 0, Math.PI*2); ctx.fill();
@@ -1999,7 +2037,7 @@ function shuffleDuration(){
   return n ? Math.max(1.6, Math.min(5, n*0.16)) : 0;
 }
 function drawShuffleSeg(lt, W, H){
-  ctx.fillStyle = "#000"; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = cBg.value; ctx.fillRect(0,0,W,H);
   const media2 = shuffleSet.arr, n = media2.length;
   const dur = shuffleDuration(), per = dur/n;
   const idx = Math.min(n-1, Math.floor(lt/per));
@@ -2027,7 +2065,7 @@ function bradyDuration(){
   return bradySet.arr.length ? (7*BRADY_STAGGER + BRADY_POP + BRADY_HOLD) : 0;
 }
 function drawBradySeg(lt, W, H){
-  ctx.fillStyle = "#0B0B0E"; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = cBg.value; ctx.fillRect(0,0,W,H);
   const media2 = bradySet.arr, n = Math.min(8, media2.length);
   const cols = W>=H ? 4 : 2, rows = Math.ceil(8/cols);
   const gap = W*0.012;
@@ -2048,10 +2086,10 @@ function drawBradySeg(lt, W, H){
       const dw = iw*sc, dh = ih*sc;
       ctx.drawImage(el, x+(cellW-dw)/2, y+(cellH-dh)/2, dw, dh);
     } else {
-      ctx.fillStyle = "#1A1A1F"; ctx.fillRect(x,y,cellW,cellH);
+      ctx.fillStyle = "rgba(0,0,0,.06)"; ctx.fillRect(x,y,cellW,cellH);
     }
     ctx.restore();
-    ctx.strokeStyle = "#0B0B0E"; ctx.lineWidth = gap; ctx.strokeRect(x,y,cellW,cellH);
+    ctx.strokeStyle = cBg.value; ctx.lineWidth = gap; ctx.strokeRect(x,y,cellW,cellH);
   }
   addFilmLook(W,H);
   drawWatermarkYear(W,H);
@@ -2449,6 +2487,161 @@ document.getElementById("deleteProject").addEventListener("click", async ()=>{
   });
   await refreshProjectList();
   statusEl.textContent = `Project "${name}" deleted.`;
+});
+
+/* ---------------- Google Drive backup ---------------- */
+/* Whole projects (photos, clips, text, settings) are packed into one binary bundle and
+   stored as a file in the user's Google Drive via the Drive API, so they aren't limited by
+   this device's storage and can be opened on any device. Uses the user's own OAuth Client ID
+   (they create a free one, see the in-app steps) and the minimal drive.file scope. */
+async function packProject(record){
+  const blobs = [];
+  const walk = v=>{
+    if(v instanceof Blob){ blobs.push(v); return {__b: blobs.length-1}; }
+    if(Array.isArray(v)) return v.map(walk);
+    if(v && typeof v==="object"){ const o={}; for(const k in v) o[k]=walk(v[k]); return o; }
+    return v;
+  };
+  const refRecord = walk(record);
+  const bufs = await Promise.all(blobs.map(b=>b.arrayBuffer()));
+  let off=0; const parts = bufs.map((buf,i)=>{ const p={o:off, l:buf.byteLength, t:blobs[i].type||""}; off+=buf.byteLength; return p; });
+  const manifestBytes = new TextEncoder().encode(JSON.stringify({record:refRecord, parts}));
+  const head = new Uint8Array(8); new DataView(head.buffer).setUint32(0, manifestBytes.length, true);
+  return new Blob([head, manifestBytes, ...bufs], {type:"application/octet-stream"});
+}
+async function unpackProject(blob){
+  const buf = await blob.arrayBuffer(); const dv = new DataView(buf);
+  const mlen = dv.getUint32(0, true);
+  const {record, parts} = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 8, mlen)));
+  const start = 8 + mlen;
+  const blobs = parts.map(p=> new Blob([new Uint8Array(buf, start + p.o, p.l)], {type:p.t||""}));
+  const unwalk = v=>{
+    if(v && typeof v==="object"){
+      if(typeof v.__b==="number") return blobs[v.__b];
+      if(Array.isArray(v)) return v.map(unwalk);
+      const o={}; for(const k in v) o[k]=unwalk(v[k]); return o;
+    }
+    return v;
+  };
+  return unwalk(record);
+}
+
+const gd = { token:null, tokenClient:null, gisLoaded:false };
+const gdEl = id => document.getElementById(id);
+gdEl("gdOrigin").textContent = location.origin;
+gdEl("gdClientId").value = store.get("gdClientId") || "";
+gdEl("gdClientId").addEventListener("change", ()=> store.set("gdClientId", gdEl("gdClientId").value.trim()));
+gdEl("gdHelpBtn").addEventListener("click", ()=>{ const h=gdEl("gdHelp"); h.style.display = h.style.display==="none" ? "block" : "none"; });
+
+function loadGis(){
+  return new Promise((res,rej)=>{
+    if(gd.gisLoaded && window.google && google.accounts) return res();
+    const s = document.createElement("script");
+    s.src = "https://accounts.google.com/gsi/client"; s.async = true; s.defer = true;
+    s.onload = ()=>{ gd.gisLoaded = true; res(); };
+    s.onerror = ()=> rej(new Error("Couldn't load Google sign-in."));
+    document.head.appendChild(s);
+  });
+}
+function gdRequestToken(){
+  return new Promise((resolve,reject)=>{
+    const clientId = (gdEl("gdClientId").value||"").trim();
+    if(!clientId){ reject(new Error("Paste your Google Client ID first.")); return; }
+    store.set("gdClientId", clientId);
+    gd.tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: "https://www.googleapis.com/auth/drive.file",
+      callback: (resp)=>{ if(resp && resp.access_token){ gd.token = resp.access_token; resolve(resp.access_token); } else reject(new Error("Google sign-in was cancelled.")); },
+      error_callback: (err)=> reject(new Error(err && err.message || "Google sign-in failed."))
+    });
+    gd.tokenClient.requestAccessToken({prompt: gd.token ? "" : "consent"});
+  });
+}
+async function gdEnsureToken(){ if(gd.token) return gd.token; await loadGis(); return gdRequestToken(); }
+async function gdApi(url, opts={}){
+  const r = await fetch(url, Object.assign({}, opts, {headers: Object.assign({Authorization:"Bearer "+gd.token}, opts.headers||{})}));
+  if(r.status===401){ gd.token=null; throw new Error("Google session expired — tap Connect again."); }
+  if(!r.ok) throw new Error("Drive error "+r.status);
+  return r;
+}
+function gdShowConnected(on){ gdEl("gdSetup").style.display = on?"none":"block"; gdEl("gdConnected").style.display = on?"block":"none"; }
+
+gdEl("gdConnect").addEventListener("click", async ()=>{
+  gdEl("gdStatus").textContent = "";
+  try{
+    await gdEnsureToken();
+    gdShowConnected(true);
+    gdEl("gdStatus").textContent = "Connected. Your projects are listed below.";
+    await gdRefreshList();
+  }catch(e){ statusEl.textContent = e.message || "Couldn't connect to Google Drive."; }
+});
+gdEl("gdDisconnect").addEventListener("click", ()=>{
+  try{ if(gd.token && window.google) google.accounts.oauth2.revoke(gd.token, ()=>{}); }catch(e){}
+  gd.token=null; gdShowConnected(false);
+});
+gdEl("gdSave").addEventListener("click", async ()=>{
+  const name = prompt("Name this Drive project (e.g. Fancy Sailors 2026):"); if(!name) return;
+  gdEl("gdStatus").textContent = "Packing project…";
+  try{
+    await gdEnsureToken();
+    await ensureSaveBlobs();
+    const bundle = await packProject(await buildProjectRecord(name));
+    gdEl("gdStatus").textContent = "Uploading to Drive…";
+    const fileName = "MasMotion — " + name + ".masmotion";
+    // update existing file of the same name, else create
+    const existing = await gdFindByName(fileName);
+    const meta = { name: fileName, mimeType: "application/octet-stream" };
+    if(existing){
+      await gdApi(`https://www.googleapis.com/upload/drive/v3/files/${existing}?uploadType=media`, {method:"PATCH", body:bundle});
+    } else {
+      const form = new FormData();
+      form.append("metadata", new Blob([JSON.stringify(meta)], {type:"application/json"}));
+      form.append("file", bundle);
+      await gdApi("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {method:"POST", body:form});
+    }
+    gdEl("gdStatus").innerHTML = `Saved <b>${name}</b> to Google Drive.`;
+    await gdRefreshList();
+  }catch(e){ gdEl("gdStatus").textContent = e.message || "Couldn't save to Drive."; }
+});
+async function gdFindByName(fileName){
+  const q = encodeURIComponent(`name = '${fileName.replace(/'/g,"\\'")}' and trashed = false`);
+  const r = await gdApi(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&spaces=drive`);
+  const j = await r.json();
+  return (j.files && j.files[0]) ? j.files[0].id : null;
+}
+async function gdRefreshList(){
+  const sel = gdEl("gdProjectSel");
+  try{
+    const q = encodeURIComponent("name contains '.masmotion' and trashed = false");
+    const r = await gdApi(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)&orderBy=modifiedTime desc&spaces=drive`);
+    const j = await r.json();
+    sel.innerHTML = "";
+    if(!j.files || !j.files.length){ sel.innerHTML = `<option value="">— none yet —</option>`; return; }
+    j.files.forEach(f=>{
+      const o = document.createElement("option");
+      o.value = f.id; o.textContent = f.name.replace(/^MasMotion — /,"").replace(/\.masmotion$/,"");
+      sel.appendChild(o);
+    });
+  }catch(e){ sel.innerHTML = `<option value="">— couldn't list —</option>`; }
+}
+gdEl("gdLoad").addEventListener("click", async ()=>{
+  const id = gdEl("gdProjectSel").value; if(!id) return;
+  gdEl("gdStatus").textContent = "Downloading from Drive…";
+  try{
+    await gdEnsureToken();
+    const r = await gdApi(`https://www.googleapis.com/drive/v3/files/${id}?alt=media`);
+    const bundle = await r.blob();
+    const record = await unpackProject(bundle);
+    await applyProjectRecord(record);
+    gdEl("gdStatus").innerHTML = `Loaded from Drive.`;
+    statusEl.innerHTML = `Project loaded from Google Drive.`;
+  }catch(e){ gdEl("gdStatus").textContent = e.message || "Couldn't load that project."; }
+});
+gdEl("gdDelete").addEventListener("click", async ()=>{
+  const id = gdEl("gdProjectSel").value; if(!id) return;
+  if(!confirm("Delete this project from your Google Drive? This can't be undone.")) return;
+  try{ await gdEnsureToken(); await gdApi(`https://www.googleapis.com/drive/v3/files/${id}`, {method:"DELETE"}); await gdRefreshList(); gdEl("gdStatus").textContent = "Deleted from Drive."; }
+  catch(e){ gdEl("gdStatus").textContent = e.message || "Couldn't delete."; }
 });
 
 /* ---------------- init ---------------- */
