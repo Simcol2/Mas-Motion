@@ -268,8 +268,8 @@
         <h3 id="textEditTitle" style="color:var(--blue)">Text slide</h3>
         <label>Text</label>
         <textarea id="teText" rows="2" maxlength="90" style="width:100%; background:#fff; border:1.5px solid var(--line); color:var(--ink); border-radius:10px; padding:9px 10px; font-family:'Sora',sans-serif; font-size:14px; resize:vertical;"></textarea>
-        <label for="teBgVideo">Faint background video (shows through at ~20%)</label>
-        <select id="teBgVideo"><option value="">— none —</option></select>
+        <label for="teBgVideo">Faint background video (shows through behind the text)</label>
+        <select id="teBgVideo"><option value="">Automatic — nearest clip</option></select>
         <label for="teBoxTL">Video in the top-left box</label>
         <select id="teBoxTL"><option value="">— none —</option></select>
         <label for="teBoxBR">Video in the bottom-right box</label>
@@ -539,6 +539,20 @@ function applyTemplate(name){
 const media = [];        // {kind:'img'|'vid'|'text', el, url, trim:{start,len}, dur, id}
 function newId(){ return "v" + Math.random().toString(36).slice(2,10); }
 function mediaById(id){ return id ? media.find(m=>m.id===id) : null; }
+/* The clip that plays faintly behind a text slide: an explicit pick if set, otherwise the
+   nearest video clip in the reel (so text slides show video behind them automatically).
+   Returns null if the slide opts out (bgVideo==="off") or there are no video clips. */
+function bgVideoForText(m){
+  if(!m || m.kind!=="text") return null;
+  if(m.bgVideo==="off") return null;
+  if(m.bgVideo){ const bv = mediaById(m.bgVideo); if(bv && bv.kind==="vid") return bv; }
+  const i = media.indexOf(m);
+  for(let d=1; d<media.length; d++){
+    const before = media[i-d]; if(before && before.kind==="vid") return before;
+    const after = media[i+d];  if(after && after.kind==="vid") return after;
+  }
+  return null;
+}
 let musicEl = null, musicSrcNode = null, musicGain = null, sharedAudioCtx = null;
 let beats = [];
 let boundaries = [];
@@ -855,12 +869,25 @@ function videoClipOptions(selectedId){
   });
   return html;
 }
+function bgVideoOptions(selected){
+  const auto = (!selected) ? " selected" : "";
+  let html = `<option value=""${auto}>Automatic — nearest clip</option>`;
+  html += `<option value="off"${selected==="off"?" selected":""}>Solid (no video)</option>`;
+  let n = 0;
+  media.forEach(mm=>{
+    if(mm.kind!=="vid") return;
+    n++;
+    const sel = mm.id===selected ? " selected" : "";
+    html += `<option value="${mm.id}"${sel}>Clip ${n}</option>`;
+  });
+  return html;
+}
 function openTextEdit(i){
   const m = media[i]; if(!m || m.kind!=="text") return;
   textEditIndex = i;
   closeTrim();
   teText.value = m.text || "";
-  teBgVideo.innerHTML = videoClipOptions(m.bgVideo);
+  teBgVideo.innerHTML = bgVideoOptions(m.bgVideo);
   teBoxTL.innerHTML = videoClipOptions(m.boxTL);
   teBoxBR.innerHTML = videoClipOptions(m.boxBR);
   document.getElementById("textEditTitle").textContent = `Text slide ${i+1}`;
@@ -1194,9 +1221,10 @@ function renderTextCard(m, W, H, revealP, exitP=0){
   const g = c.getContext("2d");
   const bg = cBg.value, accent = cAccent.value, txtCol = cText.value, fam = fontSel.value;
   g.clearRect(0,0,W,H);
-  // if a faint background clip is set, the backdrop is ~80% opaque so the video shows through
-  const hasBgVid = !!(m.bgVideo && mediaById(m.bgVideo));
-  g.fillStyle = hasBgVid ? hexA(bg, 0.8) : bg;
+  // when a clip shows faintly behind, the backdrop is ~65% opaque so the video reads clearly
+  // (about a third visible) while the screen stays mostly white with crisp text
+  const hasBgVid = !!bgVideoForText(m);
+  g.fillStyle = hasBgVid ? hexA(bg, 0.65) : bg;
   g.fillRect(0,0,W,H);
   // template stripe accents, top and bottom
   const sh = Math.round(H*0.014), seg = W/currentStripe.length;
@@ -1476,7 +1504,8 @@ function renderMainFrame(t, W, H){
 
   // clips playing inside a text slide's corner boxes or as its faint background must keep running
   const curSlide = media[realIdx];
-  const boxIds = (curSlide && curSlide.kind==="text") ? [curSlide.boxTL, curSlide.boxBR, curSlide.bgVideo].filter(Boolean) : [];
+  const curBg = (curSlide && curSlide.kind==="text") ? bgVideoForText(curSlide) : null;
+  const boxIds = (curSlide && curSlide.kind==="text") ? [curSlide.boxTL, curSlide.boxBR, curBg?curBg.id:null].filter(Boolean) : [];
 
   const trW = Math.min(0.45, sd/2.5);
   const inTrans = idx < media.length-1 && local > sd - trW;
@@ -1525,9 +1554,9 @@ function renderMainFrame(t, W, H){
   if(nx && nx.kind==="text") renderTextCard(nx, W, H, 0, 0);
 
   // faint background video behind a text slide: draw the clip full-frame, then the card's
-  // ~80%-opaque white lets it show through at about 20%.
-  if(m.kind==="text" && m.bgVideo){
-    const bv = mediaById(m.bgVideo);
+  // semi-opaque white lets it show through.
+  if(m.kind==="text"){
+    const bv = bgVideoForText(m);
     if(bv && bv.kind==="vid") coverDraw(bv.el, W, H, 1, 0, 0, 1);
   }
 
