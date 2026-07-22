@@ -979,18 +979,17 @@ function detectBeats(buf){
   return out;
 }
 
-/* Build slide boundaries: even spacing, snapped to nearest beats when possible */
-/* Per-slide durations depend on type, so nothing lingers and no clip has to repeat itself:
-   - a video slide runs for EXACTLY its trimmed clip length (plays through once — no repeat),
-   - a text slide is ~1 second shorter than an even share (they were feeling too long),
-   - photo slides share out the rest.
-   The overall length is whatever these add up to (photos absorb the slack toward the slider). */
+/* Per-slide durations depend on type, and each slide gets EXACTLY that time — no beat-snapping
+   that would stretch/shrink it (that's why a "2 second" clip could end up on screen longer):
+   - a video slide runs for exactly its trimmed clip length (÷ its playback speed),
+   - a text slide is ~0.5s shorter than an even share,
+   - photo slides share out the rest toward the target length. */
 function computeBoundaries(){
   const n = media.length, dur = +durRange.value;
   if(n <= 0) return [0, Math.max(2, dur)];
   const even = dur/n;
   const durs = media.map(m=>{
-    if(m.kind==="text") return Math.max(1.3, even - 1);
+    if(m.kind==="text") return Math.max(1.6, even - 0.5);
     if(m.kind==="vid")  return Math.max(0.6, (m.trim ? m.trim.len : even) / (m.speed || 1));
     return -1; // photo — filled below
   });
@@ -998,18 +997,6 @@ function computeBoundaries(){
   const fixed = durs.reduce((a,d)=> a + (d>0?d:0), 0);
   if(imgIdx.length){ const per = Math.max(0.8, (dur - fixed)/imgIdx.length); imgIdx.forEach(i=> durs[i]=per); }
   const b = [0]; for(let i=0;i<n;i++) b.push(b[i] + durs[i]);
-  // gentle beat snap on interior cuts, but never shrink a slide below ~0.4s
-  const abeats = beatSyncBox.checked ? activeBeats() : [];
-  if(abeats.length && n>1){
-    const total = b[n];
-    for(let i=1;i<n;i++){
-      const target = b[i], tol = Math.min(0.3, durs[i-1]*0.35);
-      let best=null, bd=Infinity;
-      abeats.forEach(bt=>{ const d=Math.abs(bt-target); if(d<bd && d<tol && bt<total){ bd=d; best=bt; } });
-      if(best!==null && best > b[i-1]+0.4) b[i] = best;
-    }
-    for(let i=1;i<n;i++){ if(b[i] <= b[i-1]+0.3) b[i] = b[i-1]+0.3; }
-  }
   return b;
 }
 function mainDuration(){ return (boundaries && boundaries.length>1) ? boundaries[boundaries.length-1] : +durRange.value; }
@@ -1491,18 +1478,20 @@ function renderMainFrame(t, W, H){
   const curSlide = media[realIdx];
   const boxIds = (curSlide && curSlide.kind==="text") ? [curSlide.boxTL, curSlide.boxBR, curSlide.bgVideo].filter(Boolean) : [];
 
+  const trW = Math.min(0.45, sd/2.5);
+  const inTrans = idx < media.length-1 && local > sd - trW;
+
   media.forEach((mm,i)=>{
     if(mm.kind!=="vid") return;
     const isCur = i===realIdx;
-    const isNextSoon = i===realNextIdx && local > sd - 0.6;
     const isBox = boxIds.includes(mm.id);
-    if(isCur || isBox){ return; }   // box clips are driven below
-    if(isNextSoon){
-      // Get the next clip decoded at its start frame ~0.6s early (so it doesn't flash black
-      // when it slides in) — but DON'T play it yet; it starts fresh when its slide begins.
-      primeFrame(mm);
-      return;
-    }
+    // Prime the next clip's first frame ~0.6s early so it doesn't flash black when it slides
+    // in — but stop priming once the transition begins, otherwise it keeps yanking the clip
+    // back to frame 0 and fights the live playback (that was the frozen/"sticky" transition).
+    const isPreRoll = i===realNextIdx && local > sd - 0.6 && !inTrans;
+    const isTransNext = i===realNextIdx && inTrans;
+    if(isCur || isBox || isTransNext){ return; }   // driven elsewhere (current / boxes / transition)
+    if(isPreRoll){ primeFrame(mm); return; }
     if(!mm.el.paused) mm.el.pause();
   });
   boxIds.forEach(id=>{ const vm = mediaById(id); if(vm && vm.kind==="vid") loopVideo(vm); });
@@ -1512,13 +1501,11 @@ function renderMainFrame(t, W, H){
   const kb = m.kind==="img" ? 1.06 + 0.14*prog : 1;
   const dir = idx%2===0 ? 1 : -1;
 
-  const trW = Math.min(0.45, sd/2.5);
-  const inTrans = idx < media.length-1 && local > sd - trW;
   let a=0, nx=null, tr="punch";
   if(inTrans){
     a = (local - (sd - trW)) / trW;
     nx = media[realNextIdx];
-    if(nx.kind==="vid") primeFrame(nx);   // show its first frame; it plays when its slide starts
+    if(nx.kind==="vid") syncVideo(nx, 0);   // play it live as it slides in — no frozen/sticky frame
     tr = transSeq[idx] || "punch";
   }
   // text slides: render their animated card before it's used as a draw source. The current
@@ -1553,7 +1540,7 @@ function renderMainFrame(t, W, H){
     const e = easeInOutQuart(a), offX = W*e*dir;
     const speed = Math.sin(a*Math.PI);
     ctx.save();
-    ctx.filter = `blur(${Math.round(20*speed)}px)`;
+    ctx.filter = `blur(${Math.round(11*speed)}px)`;
     coverDraw(mEl, W, H, kb, -offX, 0, 1);
     coverDraw(nxEl, W, H, 1.02, dir*W - offX, 0, 1);
     ctx.restore();
@@ -1565,26 +1552,26 @@ function renderMainFrame(t, W, H){
   } else if(tr==="punch"){
     const e = easeOutQuint(a);
     ctx.save();
-    ctx.filter = `blur(${Math.round(16*(1-a))}px)`;
+    ctx.filter = `blur(${Math.round(10*(1-a))}px)`;
     ctx.globalAlpha = clamp01(1 - a*1.1);
     coverDraw(mEl, W, H, kb*(1+0.32*a), 0, 0, 1);
     ctx.restore();
     ctx.globalAlpha = 1;
     const shake = (a>0.15 && a<0.55) ? (Math.random()-0.5)*W*0.014*(1-a) : 0;
     ctx.save();
-    if(a < 0.55) ctx.filter = `blur(${Math.round(14*(0.55-a))}px)`;
+    if(a < 0.55) ctx.filter = `blur(${Math.round(9*(0.55-a))}px)`;
     coverDraw(nxEl, W, H, 1.4 - 0.4*e, shake, shake*0.6, clamp01(a*2.2));
     ctx.restore();
   } else if(tr==="spin"){
     const e = easeOutQuint(a);
     const speed = Math.sin(a*Math.PI);
     ctx.save();
-    ctx.filter = `blur(${Math.round(10*speed)}px)`;
+    ctx.filter = `blur(${Math.round(6*speed)}px)`;
     coverDraw(mEl, W, H, kb, 0, 0, clamp01(1-a*1.2));
     ctx.restore();
     ctx.save();
     ctx.translate(W/2,H/2); ctx.rotate((1-e)*0.22*dir); ctx.translate(-W/2,-H/2);
-    ctx.filter = `blur(${Math.round(12*speed)}px)`;
+    ctx.filter = `blur(${Math.round(7*speed)}px)`;
     coverDraw(nxEl, W, H, 1 + 0.45*(1-e), 0, 0, clamp01(a*1.8));
     ctx.restore();
   } else if(tr==="glitch"){
