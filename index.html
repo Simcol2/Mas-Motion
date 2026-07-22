@@ -514,19 +514,10 @@ function shuffleOrder(n){
   }
   return arr;
 }
-/* Photos & clips get shuffled for variety, but text slides stay pinned exactly where the
-   user placed them (an opener must open) — so only non-text slots are shuffled. */
+/* Slides now play in EXACTLY the order they're arranged in the tile strip — no reshuffling.
+   The order sticks across every preview and export; rearrange with the ← → tile arrows. */
 function buildSlideOrder(){
-  const n = media.length;
-  const order = new Array(n);
-  const freeSlots = [], freeItems = [];
-  for(let i=0;i<n;i++){
-    if(media[i].kind==="text"){ order[i] = i; }
-    else { freeSlots.push(i); freeItems.push(i); }
-  }
-  for(let i=freeItems.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [freeItems[i],freeItems[j]]=[freeItems[j],freeItems[i]]; }
-  freeSlots.forEach((slot,k)=> order[slot] = freeItems[k]);
-  return order;
+  return Array.from({length: media.length}, (_,i)=>i);
 }
 
 const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
@@ -602,6 +593,10 @@ function queuePoster(m){
 async function runPosterQueue(){
   if(posterBusy) return; posterBusy = true;
   while(posterQueue.length){
+    // Never grab poster frames while a preview/export is running — capturePoster plays a
+    // clip to grab a frame, and that fights the timeline's own playback for the phone's
+    // video decoders, which is what made clips freeze while making changes. Wait it out.
+    if(playing || recording){ await new Promise(r=>setTimeout(r, 400)); continue; }
     const m = posterQueue.shift();
     if(!m || m.kind!=="vid" || m.poster || media.indexOf(m)===-1){ if(m) m._posterQueued=false; continue; }
     try{ await capturePoster(m); }catch(e){}
@@ -1186,10 +1181,8 @@ function renderTextCard(m, W, H, revealP, exitP=0){
     ? raw.split(",").map(s=>s.trim()).filter(Boolean).map((s,i,a)=> i<a.length-1 ? s+"," : s)
     : null;
   const maxW = W*0.86, maxH = H*0.66, PADF = 0.24;
-  function buildLines(fontPx){
-    g.font = fontStr(fontPx, fam);
-    if(commaLines) return commaLines.map(s=> parseWords(s));
-    const words = parseWords(raw), spaceW = g.measureText(" ").width;
+  function wrapWords(words){
+    const spaceW = g.measureText(" ").width;
     const lines=[]; let line=[], w=0;
     words.forEach(word=>{
       const ww = g.measureText(word.t).width;
@@ -1198,6 +1191,13 @@ function renderTextCard(m, W, H, revealP, exitP=0){
     });
     if(line.length) lines.push(line);
     return lines;
+  }
+  function buildLines(fontPx){
+    g.font = fontStr(fontPx, fam);
+    // Comma phrases start new lines, but a long phrase still wraps within itself (so a long
+    // custom slide doesn't end up crammed onto one shrunken line).
+    if(commaLines){ let out=[]; commaLines.forEach(s=>{ out = out.concat(wrapWords(parseWords(s))); }); return out; }
+    return wrapWords(parseWords(raw));
   }
   const lineText = ws => ws.map(o=>o.t).join(" ");
   // Shrink the font until the widest line (chip padding included) AND the whole block fit.
@@ -1235,7 +1235,7 @@ function renderTextCard(m, W, H, revealP, exitP=0){
       if(wp>0){
         const e = easeOutBack(wp);
         const slide = (1-wp)*fontPx*0.55;
-        const grow = o.hero ? (1 + exitP*0.5) : 1;                       // hero word grows on exit
+        const grow = o.hero ? (1 + exitP*0.6) : 1;                       // hero word grows on exit
         const chipCol = o.emph ? "#FFFFFF" : (o.hero ? lerpColor(accent, "#FFFFFF", exitP) : accent);
         const textCol = o.emph ? "#111111" : (o.hero ? lerpColor(chipText, accent, exitP) : chipText);
         g.save();
@@ -1248,6 +1248,7 @@ function renderTextCard(m, W, H, revealP, exitP=0){
         roundRectPath(g, -ww/2 - pad, -fontPx*0.62, ww + pad*2, fontPx*1.24, fontPx*0.22);
         g.fill();
         g.shadowColor = "transparent"; g.shadowBlur = 0; g.shadowOffsetY = 0;
+        if(o.hero){ g.lineWidth = fontPx*0.06; g.strokeStyle = "#FFFFFF"; g.stroke(); }  // hero stands out
         g.fillStyle = textCol;
         g.fillText(o.t, -ww/2, 0);
         g.restore();
@@ -1449,12 +1450,17 @@ function renderMainFrame(t, W, H){
   // slide is fully revealed unless it's the very first slide bursting in on its own; an
   // incoming slide bursts in as the transition slides it on (revealP = transition progress).
   if(m.kind==="text"){
-    const rp = (playing||recording) ? (idx===0 ? clamp01(local/0.45) : 1) : 1;
-    // exitP rises over the last ~0.7s the slide is on screen, driving the hero-word grow
-    const exitP = (playing||recording) ? clamp01((local - (sd - 0.7))/0.7) : 0;
+    // Reveal plays while the slide is CENTRED (for every slide, not just the first) so the
+    // line-by-line entrance is always visible; the grow plays over the slide's last stretch.
+    const revealDur = Math.min(0.75, sd*0.45);
+    const exitWin = Math.min(1.0, sd*0.5);
+    const rp = (playing||recording) ? clamp01(local/revealDur) : 1;
+    const exitP = (playing||recording) ? clamp01((local - (sd - exitWin))/exitWin) : 0;
     renderTextCard(m, W, H, rp, exitP);
   }
-  if(nx && nx.kind==="text") renderTextCard(nx, W, H, a, 0);
+  // an incoming text slide slides in blank, then reveals once it's centred (avoids a
+  // double-reveal and keeps the line-by-line entrance clearly visible)
+  if(nx && nx.kind==="text") renderTextCard(nx, W, H, 0, 0);
   // draw from downscaled copies for images (cheap); videos fall through to their element
   const mEl = imgSrc(m), nxEl = nx ? imgSrc(nx) : null;
 
@@ -2081,7 +2087,7 @@ previewBtn.addEventListener("click", async ()=>{
   playing = true; previewBtn.textContent = "Stop";
   if(musicEl){ musicEl.currentTime=musicStartSec(); musicEl.play().catch(()=>{}); }
   statusEl.textContent = "Previewing…";
-  runTimeline(()=>{ playing=false; previewBtn.textContent="Preview"; stopAllVideos(); statusEl.textContent="Preview done. Shuffle picks fresh transitions each run, so preview again for a new mix."; });
+  runTimeline(()=>{ playing=false; previewBtn.textContent="Preview"; stopAllVideos(); statusEl.textContent="Preview done."; scheduleAutosave(400); });
 });
 
 exportBtn.addEventListener("click", async ()=>{
@@ -2176,6 +2182,58 @@ async function blobOf(m){ return m.blob || await blobFromUrl(m.url); }
 async function blobsFromSet(set){
   return Promise.all(set.arr.map(async m=>({blob: await blobOf(m)})));
 }
+
+/* Saving stored each clip's FULL original file. A few big phone clips blow past the browser's
+   storage quota, so the save fails silently and the whole project is lost on refresh. Instead
+   we keep a compact copy of just the trimmed seconds each clip uses — re-encoded at a high
+   bitrate so it still looks great, but small enough that saves always fit. Generated in the
+   background only when idle (never while a preview/export is running, so it can't fight the
+   timeline for the phone's video decoders), and cached so it isn't redone every save. The
+   live session still exports from the untouched originals — export quality is unchanged. */
+let saveBlobBusy = false;
+function trimSig(m){ return m.trim ? (m.trim.start.toFixed(2)+"|"+m.trim.len.toFixed(2)) : ""; }
+async function ensureSaveBlobs(){
+  if(saveBlobBusy) return; saveBlobBusy = true;
+  try{
+    for(const m of media){
+      if(m.kind!=="vid") continue;
+      if(playing || recording) break;
+      if(m.saveBlob && m.saveBlobSig===trimSig(m)) continue;
+      const blob = await recordTrimmed(m);
+      if(blob){ m.saveBlob = blob; m.saveBlobSig = trimSig(m); }
+    }
+  } finally { saveBlobBusy = false; }
+}
+function recordTrimmed(m){
+  return new Promise(resolve=>{
+    try{
+      const v = m.el;
+      const vw = v.videoWidth||640, vh = v.videoHeight||360;
+      const sc = Math.min(1, 1280/Math.max(vw,vh));
+      const w = Math.max(2, Math.round(vw*sc)), h = Math.max(2, Math.round(vh*sc));
+      const off = document.createElement("canvas"); off.width=w; off.height=h;
+      const octx = off.getContext("2d");
+      const stream = off.captureStream(30);
+      const mime = ["video/webm;codecs=vp9","video/webm;codecs=vp8","video/webm"].find(t=>MediaRecorder.isTypeSupported(t))||"";
+      const rec = new MediaRecorder(stream, mime?{mimeType:mime, videoBitsPerSecond: 6_000_000}:{});
+      const chunks=[]; rec.ondataavailable=e=>{ if(e.data.size) chunks.push(e.data); };
+      let finished=false, raf=null;
+      const end = m.trim.start + m.trim.len;
+      rec.onstop = ()=> resolve(chunks.length ? new Blob(chunks,{type:mime||"video/webm"}) : null);
+      const finish=()=>{ if(finished) return; finished=true; if(raf) cancelAnimationFrame(raf); try{ v.pause(); }catch(e){} try{ rec.stop(); }catch(e){ resolve(null); } };
+      const draw=()=>{
+        if(playing || recording){ finish(); return; }   // bail if a preview/export starts
+        try{ octx.drawImage(v,0,0,w,h); }catch(e){}
+        if(v.currentTime>=end-0.02 || v.ended){ finish(); return; }
+        raf=requestAnimationFrame(draw);
+      };
+      const onSeeked=()=>{ v.removeEventListener("seeked", onSeeked); try{ rec.start(); v.playbackRate=1; v.play().then(draw).catch(()=>finish()); }catch(e){ finish(); } };
+      v.addEventListener("seeked", onSeeked);
+      try{ v.pause(); v.muted=true; v.currentTime = m.trim.start; }catch(e){ finish(); }
+      setTimeout(finish, m.trim.len*1000 + 5000);
+    }catch(e){ resolve(null); }
+  });
+}
 async function loadImageBlobInto(set, blob){
   return new Promise(resolve=>{
     const url = URL.createObjectURL(blob);
@@ -2192,7 +2250,9 @@ async function buildProjectRecord(name){
   return {
     name, savedAt: Date.now(),
     media: await Promise.all(media.map(async m=>
-      m.kind==="vid"  ? { kind:"vid", blob: await blobOf(m), trim:m.trim, dur:m.dur, speed:m.speed||1, id:m.id }
+      m.kind==="vid"  ? (m.saveBlob
+          ? { kind:"vid", blob:m.saveBlob, trim:{start:0, len:m.trim.len}, dur:m.trim.len, speed:m.speed||1, id:m.id }
+          : { kind:"vid", blob: await blobOf(m), trim:m.trim, dur:m.dur, speed:m.speed||1, id:m.id })
       : m.kind==="text" ? { kind:"text", text:m.text, boxTL:m.boxTL||null, boxBR:m.boxBR||null }
       : { kind:"img", blob: await blobOf(m) }
     )),
@@ -2233,7 +2293,7 @@ async function readRecord(name){
     req.onsuccess = ()=>res(req.result); req.onerror = ()=>rej(req.error);
   });
 }
-async function saveProject(name){ await writeRecord(await buildProjectRecord(name)); }
+async function saveProject(name){ await ensureSaveBlobs(); await writeRecord(await buildProjectRecord(name)); }
 
 /* ---------- auto-save: your work survives a refresh with nothing to click ---------- */
 const AUTOSAVE_KEY = "__autosave__";
@@ -2250,6 +2310,7 @@ async function runAutosave(){
   if(!anything) return;
   autosaveBusy = true;
   try{
+    await ensureSaveBlobs();                     // compact copies first, so the write fits quota
     await writeRecord(await buildProjectRecord(AUTOSAVE_KEY));
   }catch(e){ /* quota or transient: keep quiet, the manual Save button surfaces real errors */ }
   finally{ autosaveBusy = false; }
@@ -2282,7 +2343,7 @@ async function applyProjectRecord(project){
         const el=document.createElement("video");
         el.muted=true; el.playsInline=true; el.preload="metadata";
         let done=false;
-        el.onloadedmetadata=()=>{ if(done)return; done=true; media.push({kind:"vid", el, url, dur:m.dur, trim:m.trim, speed:m.speed||1, id:m.id||newId(), blob:m.blob}); res(); };
+        el.onloadedmetadata=()=>{ if(done)return; done=true; const it={kind:"vid", el, url, dur:m.dur, trim:m.trim, speed:m.speed||1, id:m.id||newId(), blob:m.blob}; it.saveBlob=m.blob; it.saveBlobSig=trimSig(it); media.push(it); res(); };
         el.onerror=()=>{ if(done)return; done=true; res(); };
         setTimeout(()=>{ if(done)return; done=true; res(); }, 6000);
         el.src=url;
