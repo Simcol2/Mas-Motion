@@ -90,6 +90,11 @@
   }
   .thumb.trimming{border-color:var(--pink);}
   .thumb img,.thumb video{width:76px; height:76px; object-fit:cover; display:block;}
+  .thumb .textcard{
+    width:76px; height:76px; display:flex; align-items:center; justify-content:center; text-align:center;
+    padding:5px; font-family:'Unbounded',sans-serif; font-weight:600; font-size:8px; line-height:1.15;
+    color:#fff; background:linear-gradient(135deg,var(--pink),var(--blue)); overflow:hidden;
+  }
   .thumb .tools{display:flex; background:#fff; border-top:1px solid var(--line);}
   .thumb .tools button{
     flex:1; background:none; border:0; color:var(--muted); font-size:12px; padding:4px 0; cursor:pointer;
@@ -210,6 +215,8 @@
         </select>
         <label>Start point</label>
         <input type="range" id="trimStart" min="0" max="10" step="0.1" value="0">
+        <label>Playback speed: <b id="trimSpeedLabel">1×</b></label>
+        <input type="range" id="trimSpeed" min="0.25" max="2" step="0.05" value="1">
         <p class="readout" id="trimReadout"></p>
         <div class="btnrow">
           <button class="smallbtn gold" id="smartPick">✨ Smart Pick</button>
@@ -225,6 +232,25 @@
       <p class="hint" style="margin:0 0 10px">These flash across the video, spaced evenly start to finish.</p>
       <div id="textLines"></div>
       <button class="add-line" id="addLine">+ Add a line</button>
+    </section>
+
+    <section class="panel">
+      <h2>2b · Openers &amp; Text Slides</h2>
+      <p class="hint" style="margin:0 0 10px">Full-screen animated text cards that sit in the sequence as their own slide. They match your template's colours and font. Add one, then use the ← → arrows on its tile to place it wherever you want.</p>
+      <label>Quick openers</label>
+      <div class="btnrow" style="margin-top:6px; flex-wrap:wrap;">
+        <button class="smallbtn" data-opener="This is the Masmentality experience">✨ Masmentality experience</button>
+        <button class="smallbtn" data-opener="Every Step, Every Wave, Every Whine">🌊 Every Step, Every Wave, Every Whine</button>
+      </div>
+      <label for="customText" style="margin-top:12px;">Or write your own</label>
+      <textarea id="customText" rows="2" maxlength="90" placeholder="Type your text slide…" style="width:100%; background:#fff; border:1.5px solid var(--line); color:var(--ink); border-radius:10px; padding:9px 10px; font-family:'Sora',sans-serif; font-size:14px; resize:vertical;"></textarea>
+      <div class="preset-row" style="margin-top:8px;">
+        <select id="textSlidePos" title="Where to place it">
+          <option value="start">Add at start</option>
+          <option value="end" selected>Add at end</option>
+        </select>
+        <button id="addTextSlide">Add text slide</button>
+      </div>
     </section>
 
     <section class="panel">
@@ -471,6 +497,20 @@ function shuffleOrder(n){
   }
   return arr;
 }
+/* Photos & clips get shuffled for variety, but text slides stay pinned exactly where the
+   user placed them (an opener must open) — so only non-text slots are shuffled. */
+function buildSlideOrder(){
+  const n = media.length;
+  const order = new Array(n);
+  const freeSlots = [], freeItems = [];
+  for(let i=0;i<n;i++){
+    if(media[i].kind==="text"){ order[i] = i; }
+    else { freeSlots.push(i); freeItems.push(i); }
+  }
+  for(let i=freeItems.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [freeItems[i],freeItems[j]]=[freeItems[j],freeItems[i]]; }
+  freeSlots.forEach((slot,k)=> order[slot] = freeItems[k]);
+  return order;
+}
 
 const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
 const statusEl = document.getElementById("status"), progFill = document.getElementById("progFill");
@@ -505,7 +545,7 @@ function addFiles(list){
       el.onloadedmetadata = ()=>{
         if(done) return; done = true;
         const dur = (el.duration && isFinite(el.duration)) ? el.duration : 3;
-        const m = {kind:"vid", el, url, dur, trim:{start:0, len:Math.min(3, dur)}, blob:f};
+        const m = {kind:"vid", el, url, dur, trim:{start:0, len:Math.min(3, dur)}, speed:1, blob:f};
         media.push(m);
         renderThumbs(); repaintIdle(); scheduleAutosave(); queuePoster(m);
       };
@@ -588,8 +628,11 @@ function renderThumbs(){
   const wrap = document.getElementById("thumbs"); wrap.innerHTML = "";
   media.forEach((m,i)=>{
     const t = document.createElement("div"); t.className = "thumb" + (i===trimIndex?" trimming":"");
+    const esc = s => String(s).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+    const speedBadge = (m.kind==="vid" && m.speed && m.speed!==1) ? ` · ${m.speed}×` : "";
     const mediaEl = m.kind==="img" ? `<img src="${m.url}" alt="slide ${i+1}">`
-      : `<img src="${m.poster || BLANK_POSTER}" alt="clip ${i+1}"><span class="vid-badge">${m.trim.len}s</span>`;
+      : m.kind==="text" ? `<div class="textcard">${esc(m.text)}</div>`
+      : `<img src="${m.poster || BLANK_POSTER}" alt="clip ${i+1}"><span class="vid-badge">${m.trim.len}s${speedBadge}</span>`;
     const cut = m.kind==="vid" ? `<button title="Trim clip" data-a="cut" data-i="${i}">✂</button>` : "";
     t.innerHTML = mediaEl + `
       <div class="tools">
@@ -615,6 +658,7 @@ function renderThumbs(){
 /* ---------------- trim editor ---------------- */
 const trimPanel = document.getElementById("trimPanel");
 const trimStart = document.getElementById("trimStart"), trimLen = document.getElementById("trimLen");
+const trimSpeed = document.getElementById("trimSpeed"), trimSpeedLabel = document.getElementById("trimSpeedLabel");
 const trimReadout = document.getElementById("trimReadout");
 
 function openTrim(i){
@@ -623,10 +667,19 @@ function openTrim(i){
   trimLen.value = String(Math.round(m.trim.len));
   trimStart.max = Math.max(0, m.dur - m.trim.len).toFixed(1);
   trimStart.value = m.trim.start.toFixed(1);
+  trimSpeed.value = m.speed || 1;
+  trimSpeedLabel.textContent = (m.speed || 1) + "×";
   document.getElementById("trimTitle").textContent = `Trim clip ${i+1} (${m.dur.toFixed(1)}s total)`;
   trimPanel.classList.add("open");
   updateTrimReadout(); renderThumbs();
 }
+trimSpeed.addEventListener("input", ()=>{
+  const m = media[trimIndex]; if(!m) return;
+  m.speed = +trimSpeed.value;
+  trimSpeedLabel.textContent = m.speed + "×";
+  try{ m.el.playbackRate = m.speed; }catch(e){}
+  scheduleAutosave();
+});
 function closeTrim(){ trimIndex = -1; trimPanel.classList.remove("open"); renderThumbs(); }
 function updateTrimReadout(){
   if(trimIndex<0) return;
@@ -713,6 +766,24 @@ function addTextLine(val=""){
 document.getElementById("addLine").addEventListener("click", ()=>addTextLine());
 addTextLine(); addTextLine();
 function getLines(){ return [...textLines.querySelectorAll("input")].map(i=>i.value.trim()).filter(Boolean); }
+
+/* ---------------- text slides (openers & custom) ---------------- */
+function addTextSlide(text, where){
+  text = (text||"").trim();
+  if(!text){ statusEl.textContent = "Type some text for the slide first."; return; }
+  const slide = {kind:"text", text};
+  if(where==="start") media.unshift(slide); else media.push(slide);
+  closeTrim(); renderThumbs(); repaintIdle(); scheduleAutosave();
+  statusEl.innerHTML = `Text slide added — use the ← → arrows on its tile to move it anywhere.`;
+}
+document.querySelectorAll("[data-opener]").forEach(b=>{
+  b.addEventListener("click", ()=> addTextSlide(b.dataset.opener, document.getElementById("textSlidePos").value));
+});
+document.getElementById("addTextSlide").addEventListener("click", ()=>{
+  const ta = document.getElementById("customText");
+  addTextSlide(ta.value, document.getElementById("textSlidePos").value);
+  ta.value = "";
+});
 
 /* ---------------- settings ---------------- */
 const durRange = document.getElementById("durRange"), durLabel = document.getElementById("durLabel");
@@ -929,7 +1000,7 @@ function buildRunPlan(force=false){
   if(!force && sig === lastRunPlanSig && runOrder.length === media.length) return;
   lastRunPlanSig = sig;
 
-  runOrder = shuffleOrder(media.length);
+  runOrder = buildSlideOrder();
   const nT = Math.max(0, media.length - 1);
   transSeq = [];
   for(let i=0;i<nT;i++){
@@ -992,7 +1063,78 @@ function makeDrawCopy(img, maxSide=1920){
   try{ c.getContext("2d").drawImage(img, 0, 0, c.width, c.height); }catch(e){ return null; }
   return c;
 }
-function imgSrc(m){ return (m && m.draw) ? m.draw : (m && m.el); }
+function imgSrc(m){
+  if(m && m.kind==="text") return m._card;   // text slides render into their own card canvas
+  return (m && m.draw) ? m.draw : (m && m.el);
+}
+/* Render a text slide into its own offscreen card canvas, matching the selected template
+   (background, stripe, accent, font). Words burst in with a scale-pop + slide-up, staggered,
+   driven by revealP (0 = nothing yet, 1 = fully arrived). */
+function renderTextCard(m, W, H, revealP){
+  let c = m._card;
+  if(!c){ c = document.createElement("canvas"); m._card = c; }
+  if(c.width!==W || c.height!==H){ c.width=W; c.height=H; }
+  if(c._tok===__frameToken && c._rp===revealP) return c;   // once per frame per state
+  c._tok = __frameToken; c._rp = revealP;
+  const g = c.getContext("2d");
+  const bg = cBg.value, accent = cAccent.value, txtCol = cText.value, fam = fontSel.value;
+  g.clearRect(0,0,W,H);
+  g.fillStyle = bg; g.fillRect(0,0,W,H);
+  // template stripe accents, top and bottom
+  const sh = Math.round(H*0.014), seg = W/currentStripe.length;
+  currentStripe.forEach((col,i)=>{ g.fillStyle=col; g.fillRect(i*seg,0,seg+1,sh); g.fillRect(i*seg,H-sh,seg+1,sh); });
+
+  const words = String(m.text||"").toUpperCase().split(/\s+/).filter(Boolean);
+  if(!words.length) return c;
+  const fontPx = Math.round(W * (fam==="Cormorant Garamond" ? 0.115 : 0.10));
+  g.textAlign = "left"; g.textBaseline = "middle";
+  g.font = fontStr(fontPx, fam);
+  const maxW = W*0.82, spaceW = g.measureText(" ").width;
+  // wrap into rows, tracking a global word index for the stagger
+  const rows=[]; let row=[], rowW=0, gi=0;
+  words.forEach(w=>{
+    const ww = g.measureText(w).width;
+    if(rowW+ww>maxW && row.length){ rows.push({row, rowW:rowW-spaceW}); row=[]; rowW=0; }
+    row.push({w, ww, gi:gi++}); rowW += ww+spaceW;
+  });
+  if(row.length) rows.push({row, rowW:rowW-spaceW});
+  const total = words.length, lineH = fontPx*1.5, cy = H/2;
+  const chipText = isLightColor(accent) ? "#241E3F" : "#FFFFFF";   // readable on the accent chip
+  rows.forEach((r,ri)=>{
+    let x = W/2 - r.rowW/2;
+    const y = cy + (ri-(rows.length-1)/2)*lineH;
+    r.row.forEach(o=>{
+      const startAt = o.gi/(total+1);
+      const wp = clamp01((revealP - startAt) / (1/(total+1) + 0.22));
+      if(wp>0){
+        const e = easeOutBack(wp);
+        const slide = (1-wp)*fontPx*0.55;
+        const pad = fontPx*0.26;
+        g.save();
+        g.globalAlpha = clamp01(wp*1.5);
+        g.translate(x + o.ww/2, y + slide);
+        g.rotate((o.gi%2===0 ? -0.02 : 0.02));
+        g.scale(e, e);
+        // punchy accent chip behind each word (matches template accent, always readable)
+        g.shadowColor = "rgba(0,0,0,.35)"; g.shadowBlur = fontPx*0.35; g.shadowOffsetY = fontPx*0.07;
+        g.fillStyle = accent;
+        roundRectPath(g, -o.ww/2 - pad, -fontPx*0.64, o.ww + pad*2, fontPx*1.28, fontPx*0.22);
+        g.fill();
+        g.shadowColor = "transparent"; g.shadowBlur = 0; g.shadowOffsetY = 0;
+        g.fillStyle = chipText;
+        g.fillText(o.w, -o.ww/2, 0);
+        g.restore();
+      }
+      x += o.ww + spaceW;
+    });
+  });
+  return c;
+}
+function roundRectPath(g,x,y,w,h,r){
+  g.beginPath();
+  g.moveTo(x+r,y); g.arcTo(x+w,y,x+w,y+h,r); g.arcTo(x+w,y+h,x,y+h,r);
+  g.arcTo(x,y+h,x,y,r); g.arcTo(x,y,x+w,y,r); g.closePath();
+}
 function wrapText(text, maxW, fontPx, fam){
   ctx.font = fontStr(fontPx, fam);
   const words = text.split(" "), lines = []; let line = "";
@@ -1069,6 +1211,8 @@ function slideIndexAt(t){
 }
 function syncVideo(m, offset){
   const v = m.el;
+  const rate = m.speed || 1;
+  if(v.playbackRate !== rate){ try{ v.playbackRate = rate; }catch(e){} }
   const end = m.trim.start + m.trim.len;
   if(v.paused){
     try{ v.currentTime = m.trim.start + (offset % m.trim.len); v.play(); }catch(e){}
@@ -1167,6 +1311,14 @@ function renderMainFrame(t, W, H){
     if(nx.kind==="vid") syncVideo(nx, 0);
     tr = transSeq[idx] || "punch";
   }
+  // text slides: render their animated card before it's used as a draw source. The current
+  // slide is fully revealed unless it's the very first slide bursting in on its own; an
+  // incoming slide bursts in as the transition slides it on (revealP = transition progress).
+  if(m.kind==="text"){
+    const rp = (playing||recording) ? (idx===0 ? clamp01(local/0.45) : 1) : 1;
+    renderTextCard(m, W, H, rp);
+  }
+  if(nx && nx.kind==="text") renderTextCard(nx, W, H, a);
   // draw from downscaled copies for images (cheap); videos fall through to their element
   const mEl = imgSrc(m), nxEl = nx ? imgSrc(nx) : null;
 
@@ -1255,7 +1407,7 @@ function renderMainFrame(t, W, H){
     coverDraw(nxEl, W, H, 1, 0, dropFrom, clamp01(a*1.6));
   }
 
-  drawTexts(t, W, H, dur, accent, txtCol, fam);
+  if(m.kind!=="text") drawTexts(t, W, H, dur, accent, txtCol, fam);   // no overlay words on a text slide
 
   if(idx>0 && local < 0.11){
     const fp = 1 - local/0.11;
@@ -1896,9 +2048,9 @@ async function buildProjectRecord(name){
   return {
     name, savedAt: Date.now(),
     media: await Promise.all(media.map(async m=>
-      m.kind==="vid"
-        ? { kind:"vid", blob: await blobOf(m), trim:m.trim, dur:m.dur }
-        : { kind:"img", blob: await blobOf(m) }
+      m.kind==="vid"  ? { kind:"vid", blob: await blobOf(m), trim:m.trim, dur:m.dur, speed:m.speed||1 }
+      : m.kind==="text" ? { kind:"text", text:m.text }
+      : { kind:"img", blob: await blobOf(m) }
     )),
     filmstrip: await blobsFromSet(filmstripSet),
     shuffle: await blobsFromSet(shuffleSet),
@@ -1971,6 +2123,7 @@ async function applyProjectRecord(project){
   media.length = 0;
   filmstripSet.arr.length = 0; shuffleSet.arr.length = 0; bradySet.arr.length = 0;
   for(const m of project.media){
+    if(m.kind==="text"){ media.push({kind:"text", text:m.text}); continue; }
     const url = URL.createObjectURL(m.blob);
     if(m.kind==="img"){
       await new Promise(res=>{
@@ -1985,7 +2138,7 @@ async function applyProjectRecord(project){
         const el=document.createElement("video");
         el.muted=true; el.playsInline=true; el.preload="metadata";
         let done=false;
-        el.onloadedmetadata=()=>{ if(done)return; done=true; media.push({kind:"vid", el, url, dur:m.dur, trim:m.trim, blob:m.blob}); res(); };
+        el.onloadedmetadata=()=>{ if(done)return; done=true; media.push({kind:"vid", el, url, dur:m.dur, trim:m.trim, speed:m.speed||1, blob:m.blob}); res(); };
         el.onerror=()=>{ if(done)return; done=true; res(); };
         setTimeout(()=>{ if(done)return; done=true; res(); }, 6000);
         el.src=url;
