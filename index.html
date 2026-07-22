@@ -253,11 +253,11 @@
       <p class="hint" style="margin:0 0 10px">Full-screen animated text cards that sit in the sequence as their own slide. They match your template's colours and font. Add one, then use the ← → arrows on its tile to place it wherever you want.</p>
       <label>Quick openers</label>
       <div class="btnrow" style="margin-top:6px; flex-wrap:wrap;">
-        <button class="smallbtn" data-opener="This is the Masmentality experience">✨ Masmentality experience</button>
+        <button class="smallbtn" data-opener="This is the _Masmentality_ experience">✨ Masmentality experience</button>
         <button class="smallbtn" data-opener="Every *Step*, Every *Wave*, Every *Whine*">🌊 Every Step, Every Wave, Every Whine</button>
       </div>
       <label for="customText" style="margin-top:12px;">Or write your own</label>
-      <p class="hint" style="margin:6px 0 0">Tip: wrap a word in *asterisks* to make it pop — <b>*STEP*</b> gets a white box with accent-coloured text.</p>
+      <p class="hint" style="margin:6px 0 0">Tips: wrap a word in *asterisks* for a white box with black text (<b>*STEP*</b>). Wrap a word in _underscores_ to make it grow &amp; change colour as the slide exits (<b>_Masmentality_</b>).</p>
       <textarea id="customText" rows="2" maxlength="90" placeholder="Type your text slide…" style="width:100%; background:#fff; border:1.5px solid var(--line); color:var(--ink); border-radius:10px; padding:9px 10px; font-family:'Sora',sans-serif; font-size:14px; resize:vertical;"></textarea>
       <div class="preset-row" style="margin-top:8px;">
         <select id="textSlidePos" title="Where to place it">
@@ -648,7 +648,7 @@ function renderThumbs(){
     const esc = s => String(s).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
     const speedBadge = (m.kind==="vid" && m.speed && m.speed!==1) ? ` · ${m.speed}×` : "";
     const mediaEl = m.kind==="img" ? `<img src="${m.url}" alt="slide ${i+1}">`
-      : m.kind==="text" ? `<div class="textcard">${esc(String(m.text).replace(/\*/g,""))}</div>`
+      : m.kind==="text" ? `<div class="textcard">${esc(String(m.text).replace(/[*_]/g,""))}</div>`
       : `<img src="${m.poster || BLANK_POSTER}" alt="clip ${i+1}"><span class="vid-badge">${m.trim.len}s${speedBadge}</span>`;
     const cut = m.kind==="vid" ? `<button title="Trim clip" data-a="cut" data-i="${i}">✂</button>`
       : m.kind==="text" ? `<button title="Edit text slide" data-a="edit" data-i="${i}">✎</button>` : "";
@@ -1148,12 +1148,12 @@ function drawVideoBox(vidM, bx, by, bw, bh){
 /* Render a text slide into its own offscreen card canvas, matching the selected template
    (background, stripe, accent, font). Words burst in with a scale-pop + slide-up, staggered,
    driven by revealP (0 = nothing yet, 1 = fully arrived). */
-function renderTextCard(m, W, H, revealP){
+function renderTextCard(m, W, H, revealP, exitP=0){
   let c = m._card;
   if(!c){ c = document.createElement("canvas"); m._card = c; }
   if(c.width!==W || c.height!==H){ c.width=W; c.height=H; }
-  if(c._tok===__frameToken && c._rp===revealP) return c;   // once per frame per state
-  c._tok = __frameToken; c._rp = revealP;
+  if(c._tok===__frameToken && c._rp===revealP && c._ep===exitP) return c;   // once per frame per state
+  c._tok = __frameToken; c._rp = revealP; c._ep = exitP;
   const g = c.getContext("2d");
   const bg = cBg.value, accent = cAccent.value, txtCol = cText.value, fam = fontSel.value;
   g.clearRect(0,0,W,H);
@@ -1165,15 +1165,19 @@ function renderTextCard(m, W, H, revealP){
   const raw = String(m.text||"").toUpperCase().trim();
   if(!raw) return c;
   g.textAlign = "left"; g.textBaseline = "middle";
-  // A word wrapped in *asterisks* is an emphasis word: white chip with accent-coloured text
-  // (e.g. *STEP* -> white box, yellow text on the Ghana template). Others stay accent chips.
+  // Word markup:  *word* -> emphasis chip (white box, black text)
+  //               _word_ -> hero word (grows + changes colour right before the slide exits)
   function parseWords(str){
-    const out=[]; let emph=false;
+    const out=[]; let emph=false, hero=false;
     str.split(/\s+/).forEach(tok=>{
       if(!tok) return;
-      let t="", we=false;
-      for(const ch of tok){ if(ch==="*"){ emph=!emph; continue; } t+=ch; if(emph) we=true; }
-      if(t) out.push({t, emph:we});
+      let t="", we=false, wh=false;
+      for(const ch of tok){
+        if(ch==="*"){ emph=!emph; continue; }
+        if(ch==="_"){ hero=!hero; continue; }
+        t+=ch; if(emph) we=true; if(hero) wh=true;
+      }
+      if(t) out.push({t, emph:we, hero:wh});
     });
     return out;
   }
@@ -1214,32 +1218,37 @@ function renderTextCard(m, W, H, revealP){
 
   g.font = fontStr(fontPx, fam);
   const spaceW = g.measureText(" ").width, pad = fontPx*PADF, lineH = fontPx*1.42, cy = H/2;
-  const total = lines.reduce((a,l)=>a+l.length, 0);
   const chipText = isLightColor(accent) ? "#241E3F" : "#FFFFFF";   // readable on the accent chip
+  const linesN = lines.length;
+  const per = 1/(linesN + 0.5);   // each line lands just after the previous one, quickly
   let gi = 0;
   lines.forEach((ws,ri)=>{
     const wws = ws.map(o=>g.measureText(o.t).width);
     const rowW = wws.reduce((a,b)=>a+b,0) + (ws.length-1)*spaceW;
     let x = W/2 - rowW/2;
-    const y = cy + (ri-(lines.length-1)/2)*lineH;
+    const y = cy + (ri-(linesN-1)/2)*lineH;
     ws.forEach((o,k)=>{
       const ww = wws[k];
-      const startAt = gi/(total+1);
-      const wp = clamp01((revealP - startAt) / (1/(total+1) + 0.22));
+      // line-by-line reveal: whole line pops together (tiny cascade within the line)
+      const startAt = ri*per + k*per*0.12;
+      const wp = clamp01((revealP - startAt) / (per*0.85));
       if(wp>0){
         const e = easeOutBack(wp);
         const slide = (1-wp)*fontPx*0.55;
+        const grow = o.hero ? (1 + exitP*0.5) : 1;                       // hero word grows on exit
+        const chipCol = o.emph ? "#FFFFFF" : (o.hero ? lerpColor(accent, "#FFFFFF", exitP) : accent);
+        const textCol = o.emph ? "#111111" : (o.hero ? lerpColor(chipText, accent, exitP) : chipText);
         g.save();
         g.globalAlpha = clamp01(wp*1.5);
         g.translate(x + ww/2, y + slide);
         g.rotate((gi%2===0 ? -0.02 : 0.02));
-        g.scale(e, e);
+        g.scale(e*grow, e*grow);
         g.shadowColor = "rgba(0,0,0,.35)"; g.shadowBlur = fontPx*0.35; g.shadowOffsetY = fontPx*0.07;
-        g.fillStyle = o.emph ? "#FFFFFF" : accent;
+        g.fillStyle = chipCol;
         roundRectPath(g, -ww/2 - pad, -fontPx*0.62, ww + pad*2, fontPx*1.24, fontPx*0.22);
         g.fill();
         g.shadowColor = "transparent"; g.shadowBlur = 0; g.shadowOffsetY = 0;
-        g.fillStyle = o.emph ? accent : chipText;
+        g.fillStyle = textCol;
         g.fillText(o.t, -ww/2, 0);
         g.restore();
       }
@@ -1270,6 +1279,7 @@ function isLightColor(hex){
 }
 function hexToRgb(hex){ return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]; }
 function hexA(hex,a){ const [r,g,b]=hexToRgb(hex); return `rgba(${r},${g},${b},${a})`; }
+function lerpColor(a,b,t){ const A=hexToRgb(a), B=hexToRgb(b); const m=(i)=>Math.round(A[i]+(B[i]-A[i])*clamp01(t)); return `rgb(${m(0)},${m(1)},${m(2)})`; }
 function fontStr(px,fam){ return `${fam==="Cormorant Garamond"?"700":"800"} ${px}px "${fam}"`; }
 const easeOutBack  = p => { const c1=1.70158, c3=c1+1; return 1 + c3*Math.pow(p-1,3) + c1*Math.pow(p-1,2); };
 const easeOutQuint = p => 1 - Math.pow(1-p,5);
@@ -1440,9 +1450,11 @@ function renderMainFrame(t, W, H){
   // incoming slide bursts in as the transition slides it on (revealP = transition progress).
   if(m.kind==="text"){
     const rp = (playing||recording) ? (idx===0 ? clamp01(local/0.45) : 1) : 1;
-    renderTextCard(m, W, H, rp);
+    // exitP rises over the last ~0.7s the slide is on screen, driving the hero-word grow
+    const exitP = (playing||recording) ? clamp01((local - (sd - 0.7))/0.7) : 0;
+    renderTextCard(m, W, H, rp, exitP);
   }
-  if(nx && nx.kind==="text") renderTextCard(nx, W, H, a);
+  if(nx && nx.kind==="text") renderTextCard(nx, W, H, a, 0);
   // draw from downscaled copies for images (cheap); videos fall through to their element
   const mEl = imgSrc(m), nxEl = nx ? imgSrc(nx) : null;
 
