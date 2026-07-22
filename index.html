@@ -225,6 +225,20 @@
         </div>
         <p class="hint">Smart Pick scans the whole video and grabs the window with the most movement, usually where the action is.</p>
       </div>
+
+      <div class="trim-panel" id="textEditPanel" style="border-color:var(--blue); background:#F4FAFE;">
+        <h3 id="textEditTitle" style="color:var(--blue)">Text slide</h3>
+        <label>Text</label>
+        <textarea id="teText" rows="2" maxlength="90" style="width:100%; background:#fff; border:1.5px solid var(--line); color:var(--ink); border-radius:10px; padding:9px 10px; font-family:'Sora',sans-serif; font-size:14px; resize:vertical;"></textarea>
+        <label for="teBoxTL">Video in the top-left box</label>
+        <select id="teBoxTL"><option value="">— none —</option></select>
+        <label for="teBoxBR">Video in the bottom-right box</label>
+        <select id="teBoxBR"><option value="">— none —</option></select>
+        <div class="btnrow">
+          <button class="smallbtn" id="teDone">Done</button>
+        </div>
+        <p class="hint">The boxes play the clips you pick, in the corners of this text slide. Upload clips in section 1 first, then choose them here.</p>
+      </div>
     </section>
 
     <section class="panel">
@@ -481,7 +495,9 @@ function applyTemplate(name){
 }
 
 /* ---------------- state ---------------- */
-const media = [];        // {kind:'img'|'vid', el, url, trim:{start,len}, dur}
+const media = [];        // {kind:'img'|'vid'|'text', el, url, trim:{start,len}, dur, id}
+function newId(){ return "v" + Math.random().toString(36).slice(2,10); }
+function mediaById(id){ return id ? media.find(m=>m.id===id) : null; }
 let musicEl = null, musicSrcNode = null, musicGain = null, sharedAudioCtx = null;
 let beats = [];
 let boundaries = [];
@@ -545,7 +561,7 @@ function addFiles(list){
       el.onloadedmetadata = ()=>{
         if(done) return; done = true;
         const dur = (el.duration && isFinite(el.duration)) ? el.duration : 3;
-        const m = {kind:"vid", el, url, dur, trim:{start:0, len:Math.min(3, dur)}, speed:1, blob:f};
+        const m = {kind:"vid", el, url, dur, trim:{start:0, len:Math.min(3, dur)}, speed:1, id:newId(), blob:f};
         media.push(m);
         renderThumbs(); repaintIdle(); scheduleAutosave(); queuePoster(m);
       };
@@ -633,7 +649,8 @@ function renderThumbs(){
     const mediaEl = m.kind==="img" ? `<img src="${m.url}" alt="slide ${i+1}">`
       : m.kind==="text" ? `<div class="textcard">${esc(m.text)}</div>`
       : `<img src="${m.poster || BLANK_POSTER}" alt="clip ${i+1}"><span class="vid-badge">${m.trim.len}s${speedBadge}</span>`;
-    const cut = m.kind==="vid" ? `<button title="Trim clip" data-a="cut" data-i="${i}">✂</button>` : "";
+    const cut = m.kind==="vid" ? `<button title="Trim clip" data-a="cut" data-i="${i}">✂</button>`
+      : m.kind==="text" ? `<button title="Edit text slide" data-a="edit" data-i="${i}">✎</button>` : "";
     t.innerHTML = mediaEl + `
       <div class="tools">
         <button title="Move earlier" data-a="up" data-i="${i}">←</button>
@@ -645,10 +662,11 @@ function renderThumbs(){
   });
   wrap.querySelectorAll("button").forEach(b=>b.addEventListener("click", ()=>{
     const i = +b.dataset.i, a = b.dataset.a;
-    if(a==="del"){ media.splice(i,1); if(trimIndex===i) closeTrim(); }
+    if(a==="del"){ media.splice(i,1); if(trimIndex===i) closeTrim(); if(textEditIndex===i) closeTextEdit(); }
     if(a==="up" && i>0) [media[i-1],media[i]]=[media[i],media[i-1]];
     if(a==="dn" && i<media.length-1) [media[i+1],media[i]]=[media[i],media[i+1]];
     if(a==="cut"){ openTrim(i); return; }
+    if(a==="edit"){ openTextEdit(i); return; }
     renderThumbs(); repaintIdle(); scheduleAutosave();
   }));
   media.forEach(m=>{ if(m.kind==="vid" && !m.poster) queuePoster(m); });
@@ -771,7 +789,7 @@ function getLines(){ return [...textLines.querySelectorAll("input")].map(i=>i.va
 function addTextSlide(text, where){
   text = (text||"").trim();
   if(!text){ statusEl.textContent = "Type some text for the slide first."; return; }
-  const slide = {kind:"text", text};
+  const slide = {kind:"text", text, boxTL:null, boxBR:null};
   if(where==="start") media.unshift(slide); else media.push(slide);
   closeTrim(); renderThumbs(); repaintIdle(); scheduleAutosave();
   statusEl.innerHTML = `Text slide added — use the ← → arrows on its tile to move it anywhere.`;
@@ -784,6 +802,42 @@ document.getElementById("addTextSlide").addEventListener("click", ()=>{
   addTextSlide(ta.value, document.getElementById("textSlidePos").value);
   ta.value = "";
 });
+
+/* ---------------- text slide editor (edit text + pick corner-box videos) ---------------- */
+const textEditPanel = document.getElementById("textEditPanel");
+const teText = document.getElementById("teText"), teBoxTL = document.getElementById("teBoxTL"), teBoxBR = document.getElementById("teBoxBR");
+let textEditIndex = -1;
+function videoClipOptions(selectedId){
+  let html = `<option value="">— none —</option>`;
+  let n = 0;
+  media.forEach(mm=>{
+    if(mm.kind!=="vid") return;
+    n++;
+    const sel = mm.id===selectedId ? " selected" : "";
+    html += `<option value="${mm.id}"${sel}>Clip ${n} · ${(mm.trim?mm.trim.len:"")}s</option>`;
+  });
+  return html;
+}
+function openTextEdit(i){
+  const m = media[i]; if(!m || m.kind!=="text") return;
+  textEditIndex = i;
+  closeTrim();
+  teText.value = m.text || "";
+  teBoxTL.innerHTML = videoClipOptions(m.boxTL);
+  teBoxBR.innerHTML = videoClipOptions(m.boxBR);
+  document.getElementById("textEditTitle").textContent = `Text slide ${i+1}`;
+  textEditPanel.classList.add("open");
+}
+function closeTextEdit(){ textEditIndex = -1; textEditPanel.classList.remove("open"); }
+teText.addEventListener("input", ()=>{
+  const m = media[textEditIndex]; if(!m) return;
+  m.text = teText.value;
+  if(m._card) m._card._tok = -1;   // force the card to re-render
+  renderThumbs(); repaintIdle(); scheduleAutosave();
+});
+teBoxTL.addEventListener("change", ()=>{ const m=media[textEditIndex]; if(m){ m.boxTL = teBoxTL.value||null; repaintIdle(); scheduleAutosave(); } });
+teBoxBR.addEventListener("change", ()=>{ const m=media[textEditIndex]; if(m){ m.boxBR = teBoxBR.value||null; repaintIdle(); scheduleAutosave(); } });
+document.getElementById("teDone").addEventListener("click", closeTextEdit);
 
 /* ---------------- settings ---------------- */
 const durRange = document.getElementById("durRange"), durLabel = document.getElementById("durLabel");
@@ -1067,6 +1121,29 @@ function imgSrc(m){
   if(m && m.kind==="text") return m._card;   // text slides render into their own card canvas
   return (m && m.draw) ? m.draw : (m && m.el);
 }
+/* A small picture-in-picture box on a text slide, cover-cropping a chosen clip's live frame
+   with an accent border. Uses the last-good-frame guard so a still-waking clip isn't black. */
+function drawVideoBox(vidM, bx, by, bw, bh){
+  const r = Math.min(bw,bh)*0.12;
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,.4)"; ctx.shadowBlur = bw*0.06; ctx.shadowOffsetY = bh*0.03;
+  ctx.fillStyle = "#0B0B0E";
+  roundRectPath(ctx, bx, by, bw, bh, r); ctx.fill();
+  ctx.restore();
+  ctx.save();
+  roundRectPath(ctx, bx, by, bw, bh, r); ctx.clip();
+  const src = drawableSource(vidM.el);
+  const iw = src.videoWidth||src.naturalWidth||src.width, ih = src.videoHeight||src.naturalHeight||src.height;
+  if(iw && ih){
+    const s = Math.max(bw/iw, bh/ih), dw = iw*s, dh = ih*s;
+    ctx.drawImage(src, bx+(bw-dw)/2, by+(bh-dh)/2, dw, dh);
+  }
+  ctx.restore();
+  ctx.save();
+  ctx.strokeStyle = cAccent.value; ctx.lineWidth = Math.max(3, bw*0.022);
+  roundRectPath(ctx, bx, by, bw, bh, r); ctx.stroke();
+  ctx.restore();
+}
 /* Render a text slide into its own offscreen card canvas, matching the selected template
    (background, stripe, accent, font). Words burst in with a scale-pop + slide-up, staggered,
    driven by revealP (0 = nothing yet, 1 = fully arrived). */
@@ -1084,48 +1161,76 @@ function renderTextCard(m, W, H, revealP){
   const sh = Math.round(H*0.014), seg = W/currentStripe.length;
   currentStripe.forEach((col,i)=>{ g.fillStyle=col; g.fillRect(i*seg,0,seg+1,sh); g.fillRect(i*seg,H-sh,seg+1,sh); });
 
-  const words = String(m.text||"").toUpperCase().split(/\s+/).filter(Boolean);
-  if(!words.length) return c;
-  const fontPx = Math.round(W * (fam==="Cormorant Garamond" ? 0.115 : 0.10));
+  const raw = String(m.text||"").toUpperCase().trim();
+  if(!raw) return c;
   g.textAlign = "left"; g.textBaseline = "middle";
+  // Lines: break at commas when present (each phrase on its own line, comma kept), so
+  // "EVERY STEP, EVERY WAVE, EVERY WHINE" reads as three tidy lines. Otherwise greedy-wrap.
+  const commaLines = raw.includes(",")
+    ? raw.split(",").map(s=>s.trim()).filter(Boolean).map((s,i,a)=> i<a.length-1 ? s+"," : s)
+    : null;
+  const maxW = W*0.86, maxH = H*0.66, PADF = 0.24;
+  function buildLines(fontPx){
+    g.font = fontStr(fontPx, fam);
+    if(commaLines) return commaLines.map(s=> s.split(/\s+/));
+    const words = raw.split(/\s+/), spaceW = g.measureText(" ").width;
+    const lines=[]; let line=[], w=0;
+    words.forEach(word=>{
+      const ww = g.measureText(word).width;
+      if(w+ww > maxW && line.length){ lines.push(line); line=[]; w=0; }
+      line.push(word); w += ww+spaceW;
+    });
+    if(line.length) lines.push(line);
+    return lines;
+  }
+  // Shrink the font until the widest line (chip padding included) AND the whole block fit.
+  let fontPx = Math.round(W * 0.15), lines;
+  for(let it=0; it<12; it++){
+    lines = buildLines(fontPx);
+    g.font = fontStr(fontPx, fam);
+    const pad = fontPx*PADF, spaceW = g.measureText(" ").width;
+    let widest = 0;
+    lines.forEach(ws=>{ widest = Math.max(widest, g.measureText(ws.join(" ")).width + pad*2); });
+    const lineH = fontPx*1.42, totalH = lines.length*lineH;
+    let scale = 1;
+    if(widest > maxW) scale = Math.min(scale, maxW/widest);
+    if(totalH > maxH) scale = Math.min(scale, maxH/totalH);
+    if(scale >= 0.999) break;
+    fontPx = Math.max(12, Math.floor(fontPx*scale*0.98));
+  }
+
   g.font = fontStr(fontPx, fam);
-  const maxW = W*0.82, spaceW = g.measureText(" ").width;
-  // wrap into rows, tracking a global word index for the stagger
-  const rows=[]; let row=[], rowW=0, gi=0;
-  words.forEach(w=>{
-    const ww = g.measureText(w).width;
-    if(rowW+ww>maxW && row.length){ rows.push({row, rowW:rowW-spaceW}); row=[]; rowW=0; }
-    row.push({w, ww, gi:gi++}); rowW += ww+spaceW;
-  });
-  if(row.length) rows.push({row, rowW:rowW-spaceW});
-  const total = words.length, lineH = fontPx*1.5, cy = H/2;
+  const spaceW = g.measureText(" ").width, pad = fontPx*PADF, lineH = fontPx*1.42, cy = H/2;
+  const total = lines.reduce((a,l)=>a+l.length, 0);
   const chipText = isLightColor(accent) ? "#241E3F" : "#FFFFFF";   // readable on the accent chip
-  rows.forEach((r,ri)=>{
-    let x = W/2 - r.rowW/2;
-    const y = cy + (ri-(rows.length-1)/2)*lineH;
-    r.row.forEach(o=>{
-      const startAt = o.gi/(total+1);
+  let gi = 0;
+  lines.forEach((ws,ri)=>{
+    const wws = ws.map(w=>g.measureText(w).width);
+    const rowW = wws.reduce((a,b)=>a+b,0) + (ws.length-1)*spaceW;
+    let x = W/2 - rowW/2;
+    const y = cy + (ri-(lines.length-1)/2)*lineH;
+    ws.forEach((w,k)=>{
+      const ww = wws[k];
+      const startAt = gi/(total+1);
       const wp = clamp01((revealP - startAt) / (1/(total+1) + 0.22));
       if(wp>0){
         const e = easeOutBack(wp);
         const slide = (1-wp)*fontPx*0.55;
-        const pad = fontPx*0.26;
         g.save();
         g.globalAlpha = clamp01(wp*1.5);
-        g.translate(x + o.ww/2, y + slide);
-        g.rotate((o.gi%2===0 ? -0.02 : 0.02));
+        g.translate(x + ww/2, y + slide);
+        g.rotate((gi%2===0 ? -0.02 : 0.02));
         g.scale(e, e);
-        // punchy accent chip behind each word (matches template accent, always readable)
         g.shadowColor = "rgba(0,0,0,.35)"; g.shadowBlur = fontPx*0.35; g.shadowOffsetY = fontPx*0.07;
         g.fillStyle = accent;
-        roundRectPath(g, -o.ww/2 - pad, -fontPx*0.64, o.ww + pad*2, fontPx*1.28, fontPx*0.22);
+        roundRectPath(g, -ww/2 - pad, -fontPx*0.62, ww + pad*2, fontPx*1.24, fontPx*0.22);
         g.fill();
         g.shadowColor = "transparent"; g.shadowBlur = 0; g.shadowOffsetY = 0;
         g.fillStyle = chipText;
-        g.fillText(o.w, -o.ww/2, 0);
+        g.fillText(w, -ww/2, 0);
         g.restore();
       }
-      x += o.ww + spaceW;
+      x += ww + spaceW; gi++;
     });
   });
   return c;
@@ -1282,20 +1387,26 @@ function renderMainFrame(t, W, H){
   const order = runOrder.length===media.length ? runOrder : media.map((_,i)=>i);
   const realIdx = order[idx], realNextIdx = order[idx+1];
 
-  media.forEach((m,i)=>{
-    if(m.kind!=="vid") return;
+  // clips playing inside a text slide's corner boxes must keep running (not be paused)
+  const curSlide = media[realIdx];
+  const boxIds = (curSlide && curSlide.kind==="text") ? [curSlide.boxTL, curSlide.boxBR].filter(Boolean) : [];
+
+  media.forEach((mm,i)=>{
+    if(mm.kind!=="vid") return;
     const isCur = i===realIdx;
     const isNextSoon = i===realNextIdx && local > sd - 0.6;
-    if(isCur){ return; }
+    const isBox = boxIds.includes(mm.id);
+    if(isCur || isBox){ return; }   // box clips are driven below
     if(isNextSoon){
       // Wake the next clip ~0.6s before its transition so it's actually decoded (and we've
       // captured a frame of it) by the time it slides in — otherwise it flashes black.
-      if(m.el.paused){ try{ m.el.currentTime = m.trim.start; m.el.play().catch(()=>{}); }catch(e){} }
-      snapshotVideo(m.el);
+      if(mm.el.paused){ try{ mm.el.currentTime = mm.trim.start; mm.el.play().catch(()=>{}); }catch(e){} }
+      snapshotVideo(mm.el);
       return;
     }
-    if(!m.el.paused) m.el.pause();
+    if(!mm.el.paused) mm.el.pause();
   });
+  boxIds.forEach(id=>{ const vm = mediaById(id); if(vm && vm.kind==="vid") syncVideo(vm, local); });
 
   const m = media[realIdx];
   if(m.kind==="vid") syncVideo(m, local);
@@ -1405,6 +1516,14 @@ function renderMainFrame(t, W, H){
     ctx.restore();
     const dropFrom = -H*0.5*(1-e);
     coverDraw(nxEl, W, H, 1, 0, dropFrom, clamp01(a*1.6));
+  }
+
+  // corner video boxes on a text slide (top-left + bottom-right)
+  if(m.kind==="text" && !inTrans && (m.boxTL || m.boxBR)){
+    const bw = W*0.30, bh = bw*1.15, mgn = W*0.05;
+    const tl = mediaById(m.boxTL), br = mediaById(m.boxBR);
+    if(tl && tl.kind==="vid") drawVideoBox(tl, mgn, mgn + H*0.02, bw, bh);
+    if(br && br.kind==="vid") drawVideoBox(br, W-mgn-bw, H-mgn-bh - H*0.02, bw, bh);
   }
 
   if(m.kind!=="text") drawTexts(t, W, H, dur, accent, txtCol, fam);   // no overlay words on a text slide
@@ -2048,8 +2167,8 @@ async function buildProjectRecord(name){
   return {
     name, savedAt: Date.now(),
     media: await Promise.all(media.map(async m=>
-      m.kind==="vid"  ? { kind:"vid", blob: await blobOf(m), trim:m.trim, dur:m.dur, speed:m.speed||1 }
-      : m.kind==="text" ? { kind:"text", text:m.text }
+      m.kind==="vid"  ? { kind:"vid", blob: await blobOf(m), trim:m.trim, dur:m.dur, speed:m.speed||1, id:m.id }
+      : m.kind==="text" ? { kind:"text", text:m.text, boxTL:m.boxTL||null, boxBR:m.boxBR||null }
       : { kind:"img", blob: await blobOf(m) }
     )),
     filmstrip: await blobsFromSet(filmstripSet),
@@ -2123,7 +2242,7 @@ async function applyProjectRecord(project){
   media.length = 0;
   filmstripSet.arr.length = 0; shuffleSet.arr.length = 0; bradySet.arr.length = 0;
   for(const m of project.media){
-    if(m.kind==="text"){ media.push({kind:"text", text:m.text}); continue; }
+    if(m.kind==="text"){ media.push({kind:"text", text:m.text, boxTL:m.boxTL||null, boxBR:m.boxBR||null}); continue; }
     const url = URL.createObjectURL(m.blob);
     if(m.kind==="img"){
       await new Promise(res=>{
@@ -2138,7 +2257,7 @@ async function applyProjectRecord(project){
         const el=document.createElement("video");
         el.muted=true; el.playsInline=true; el.preload="metadata";
         let done=false;
-        el.onloadedmetadata=()=>{ if(done)return; done=true; media.push({kind:"vid", el, url, dur:m.dur, trim:m.trim, speed:m.speed||1, blob:m.blob}); res(); };
+        el.onloadedmetadata=()=>{ if(done)return; done=true; media.push({kind:"vid", el, url, dur:m.dur, trim:m.trim, speed:m.speed||1, id:m.id||newId(), blob:m.blob}); res(); };
         el.onerror=()=>{ if(done)return; done=true; res(); };
         setTimeout(()=>{ if(done)return; done=true; res(); }, 6000);
         el.src=url;
