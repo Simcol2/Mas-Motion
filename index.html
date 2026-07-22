@@ -547,10 +547,18 @@ function bgVideoForText(m){
   if(m.bgVideo==="off") return null;
   if(m.bgVideo){ const bv = mediaById(m.bgVideo); if(bv && bv.kind==="vid") return bv; }
   const i = media.indexOf(m);
-  for(let d=1; d<media.length; d++){
+  // Prefer a clip that is NOT an immediate neighbour. If a text slide borrows the clip that
+  // played right before (or plays right after) it, that clip appears to play a second time
+  // behind the text — which reads as "the video repeated before the next clip". Reaching for
+  // a farther-off clip keeps a faint moving backdrop without echoing the adjacent slide.
+  for(let d=2; d<media.length; d++){
     const before = media[i-d]; if(before && before.kind==="vid") return before;
     const after = media[i+d];  if(after && after.kind==="vid") return after;
   }
+  // only fall back to an adjacent clip when there's genuinely no other video to use
+  const b1 = media[i-1], a1 = media[i+1];
+  if(b1 && b1.kind==="vid") return b1;
+  if(a1 && a1.kind==="vid") return a1;
   return null;
 }
 let musicEl = null, musicSrcNode = null, musicGain = null, sharedAudioCtx = null;
@@ -1221,10 +1229,10 @@ function renderTextCard(m, W, H, revealP, exitP=0){
   const g = c.getContext("2d");
   const bg = cBg.value, accent = cAccent.value, txtCol = cText.value, fam = fontSel.value;
   g.clearRect(0,0,W,H);
-  // when a clip shows faintly behind, the backdrop is ~65% opaque so the video reads clearly
-  // (about a third visible) while the screen stays mostly white with crisp text
+  // when a clip shows faintly behind, the backdrop is ~80% opaque so the screen stays mostly
+  // white with crisp text and the video only whispers through (about a fifth visible)
   const hasBgVid = !!bgVideoForText(m);
-  g.fillStyle = hasBgVid ? hexA(bg, 0.65) : bg;
+  g.fillStyle = hasBgVid ? hexA(bg, 0.80) : bg;
   g.fillRect(0,0,W,H);
   // template stripe accents, top and bottom
   const sh = Math.round(H*0.014), seg = W/currentStripe.length;
@@ -1858,26 +1866,64 @@ function drawIdleCard(W,H,accent,fam){
 function repaintIdle(){ if(!playing && !recording){ boundaries = media.length ? computeBoundaries() : [0]; renderFrame(0); } }
 
 /* ---------------- logo, watermark, year, outro ---------------- */
-function outroLen(){ return (endLogoOn.checked && logoImg) ? 1.2 : 0; }
+function outroLen(){ return (endLogoOn.checked && logoImg) ? 3.0 : 0; }
 function filmstripLen(){ return (filmstripSegOn.checked && filmstripSet.arr.length) ? filmstripDuration() : 0; }
 function shuffleLen(){ return (shuffleSegOn.checked && shuffleSet.arr.length) ? shuffleDuration() : 0; }
 function bradyLen(){ return (bradySegOn.checked && bradySet.arr.length) ? bradyDuration() : 0; }
 function totalDuration(){ return mainDuration() + filmstripLen() + shuffleLen() + bradyLen() + outroLen(); }
 
-function drawOutroCard(lt, W, H){
-  ctx.fillStyle = cBg.value; ctx.fillRect(0,0,W,H);
-  const p = clamp01(lt/0.35);
-  const s = 0.85 + 0.15*easeOutBack(p);
+/* A four-point sparkle (concave star) with a soft glow — used to twinkle around the end logo. */
+function drawSparkle(x, y, r, rot, alpha, col){
+  if(r<=0 || alpha<=0.01) return;
   ctx.save();
-  ctx.globalAlpha = p;
-  ctx.translate(W/2, H/2); ctx.scale(s,s);
+  ctx.translate(x,y); ctx.rotate(rot);
+  ctx.globalAlpha = clamp01(alpha);
+  ctx.fillStyle = col;
+  ctx.shadowColor = col; ctx.shadowBlur = r*1.4;
+  const w = r*0.16;
+  ctx.beginPath();
+  ctx.moveTo(0,-r);
+  ctx.quadraticCurveTo(w,-w, r,0);
+  ctx.quadraticCurveTo(w,w, 0,r);
+  ctx.quadraticCurveTo(-w,w, -r,0);
+  ctx.quadraticCurveTo(-w,-w, 0,-r);
+  ctx.closePath(); ctx.fill();
+  // bright pinpoint centre
+  ctx.shadowBlur = 0; ctx.fillStyle = "#FFFFFF"; ctx.globalAlpha = clamp01(alpha)*0.9;
+  ctx.beginPath(); ctx.arc(0,0, r*0.16, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+function drawOutroCard(lt, W, H){
+  const OL = outroLen();
+  ctx.fillStyle = cBg.value; ctx.fillRect(0,0,W,H);
+  const fade = clamp01(lt/0.45);                 // quick, gentle fade-in
+  const q = clamp01(lt/OL);
+  const grow = 0.64 + 0.44*Math.pow(q,0.85);     // slow, continuous grow across the whole clip
+  // draw the logo, capturing its on-screen size so sparkles can ring it
+  let boxW = 0, boxH = 0;
+  ctx.save();
+  ctx.globalAlpha = fade;
+  ctx.translate(W/2, H/2); ctx.scale(grow, grow);
   if(logoImg){
     const iw = logoImg.naturalWidth||1, ih = logoImg.naturalHeight||1;
-    const maxW = W*0.42, maxH = H*0.22;
-    const sc = Math.min(maxW/iw, maxH/ih);
-    ctx.drawImage(logoImg, -iw*sc/2, -ih*sc/2, iw*sc, ih*sc);
+    const sc = Math.min((W*0.42)/iw, (H*0.22)/ih);
+    boxW = iw*sc; boxH = ih*sc;
+    ctx.drawImage(logoImg, -boxW/2, -boxH/2, boxW, boxH);
   }
   ctx.restore();
+  // sparkles twinkling around the growing logo
+  const accent = cAccent.value, gold = "#F4C430";
+  const halfW = (boxW*grow)/2, halfH = (boxH*grow)/2;
+  const pts = [[-0.95,-0.75],[0.9,-0.6],[-0.65,0.85],[0.75,0.8],[0.05,-1.15],[-1.12,0.05],[1.12,0.2],[0.25,1.1],[-0.35,-1.05]];
+  pts.forEach((pp,i)=>{
+    const px = W/2 + pp[0]*(halfW + W*0.06);
+    const py = H/2 + pp[1]*(halfH + H*0.035);
+    const phase = i*1.9;
+    const tw = Math.sin(lt*3.1 + phase);          // per-sparkle twinkle
+    if(tw <= 0) return;
+    const r = W*0.010 + W*0.020*tw;
+    drawSparkle(px, py, r, lt*1.4 + phase, tw*fade*0.95, i%2 ? gold : accent);
+  });
   if(document.getElementById("stripeOn").checked){
     const sh = Math.round(H*0.012), seg = W/currentStripe.length;
     currentStripe.forEach((c,i)=>{ ctx.fillStyle = c; ctx.fillRect(i*seg, H-sh, seg+1, sh); });
