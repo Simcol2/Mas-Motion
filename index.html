@@ -254,9 +254,10 @@
       <label>Quick openers</label>
       <div class="btnrow" style="margin-top:6px; flex-wrap:wrap;">
         <button class="smallbtn" data-opener="This is the Masmentality experience">✨ Masmentality experience</button>
-        <button class="smallbtn" data-opener="Every Step, Every Wave, Every Whine">🌊 Every Step, Every Wave, Every Whine</button>
+        <button class="smallbtn" data-opener="Every *Step*, Every *Wave*, Every *Whine*">🌊 Every Step, Every Wave, Every Whine</button>
       </div>
       <label for="customText" style="margin-top:12px;">Or write your own</label>
+      <p class="hint" style="margin:6px 0 0">Tip: wrap a word in *asterisks* to make it pop — <b>*STEP*</b> gets a white box with accent-coloured text.</p>
       <textarea id="customText" rows="2" maxlength="90" placeholder="Type your text slide…" style="width:100%; background:#fff; border:1.5px solid var(--line); color:var(--ink); border-radius:10px; padding:9px 10px; font-family:'Sora',sans-serif; font-size:14px; resize:vertical;"></textarea>
       <div class="preset-row" style="margin-top:8px;">
         <select id="textSlidePos" title="Where to place it">
@@ -647,7 +648,7 @@ function renderThumbs(){
     const esc = s => String(s).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
     const speedBadge = (m.kind==="vid" && m.speed && m.speed!==1) ? ` · ${m.speed}×` : "";
     const mediaEl = m.kind==="img" ? `<img src="${m.url}" alt="slide ${i+1}">`
-      : m.kind==="text" ? `<div class="textcard">${esc(m.text)}</div>`
+      : m.kind==="text" ? `<div class="textcard">${esc(String(m.text).replace(/\*/g,""))}</div>`
       : `<img src="${m.poster || BLANK_POSTER}" alt="clip ${i+1}"><span class="vid-badge">${m.trim.len}s${speedBadge}</span>`;
     const cut = m.kind==="vid" ? `<button title="Trim clip" data-a="cut" data-i="${i}">✂</button>`
       : m.kind==="text" ? `<button title="Edit text slide" data-a="edit" data-i="${i}">✎</button>` : "";
@@ -1164,33 +1165,45 @@ function renderTextCard(m, W, H, revealP){
   const raw = String(m.text||"").toUpperCase().trim();
   if(!raw) return c;
   g.textAlign = "left"; g.textBaseline = "middle";
-  // Lines: break at commas when present (each phrase on its own line, comma kept), so
-  // "EVERY STEP, EVERY WAVE, EVERY WHINE" reads as three tidy lines. Otherwise greedy-wrap.
+  // A word wrapped in *asterisks* is an emphasis word: white chip with accent-coloured text
+  // (e.g. *STEP* -> white box, yellow text on the Ghana template). Others stay accent chips.
+  function parseWords(str){
+    const out=[]; let emph=false;
+    str.split(/\s+/).forEach(tok=>{
+      if(!tok) return;
+      let t="", we=false;
+      for(const ch of tok){ if(ch==="*"){ emph=!emph; continue; } t+=ch; if(emph) we=true; }
+      if(t) out.push({t, emph:we});
+    });
+    return out;
+  }
+  // Lines: break at commas when present (each phrase on its own line, comma kept). Otherwise wrap.
   const commaLines = raw.includes(",")
     ? raw.split(",").map(s=>s.trim()).filter(Boolean).map((s,i,a)=> i<a.length-1 ? s+"," : s)
     : null;
   const maxW = W*0.86, maxH = H*0.66, PADF = 0.24;
   function buildLines(fontPx){
     g.font = fontStr(fontPx, fam);
-    if(commaLines) return commaLines.map(s=> s.split(/\s+/));
-    const words = raw.split(/\s+/), spaceW = g.measureText(" ").width;
+    if(commaLines) return commaLines.map(s=> parseWords(s));
+    const words = parseWords(raw), spaceW = g.measureText(" ").width;
     const lines=[]; let line=[], w=0;
     words.forEach(word=>{
-      const ww = g.measureText(word).width;
+      const ww = g.measureText(word.t).width;
       if(w+ww > maxW && line.length){ lines.push(line); line=[]; w=0; }
       line.push(word); w += ww+spaceW;
     });
     if(line.length) lines.push(line);
     return lines;
   }
+  const lineText = ws => ws.map(o=>o.t).join(" ");
   // Shrink the font until the widest line (chip padding included) AND the whole block fit.
   let fontPx = Math.round(W * 0.15), lines;
   for(let it=0; it<12; it++){
     lines = buildLines(fontPx);
     g.font = fontStr(fontPx, fam);
-    const pad = fontPx*PADF, spaceW = g.measureText(" ").width;
+    const pad = fontPx*PADF;
     let widest = 0;
-    lines.forEach(ws=>{ widest = Math.max(widest, g.measureText(ws.join(" ")).width + pad*2); });
+    lines.forEach(ws=>{ widest = Math.max(widest, g.measureText(lineText(ws)).width + pad*2); });
     const lineH = fontPx*1.42, totalH = lines.length*lineH;
     let scale = 1;
     if(widest > maxW) scale = Math.min(scale, maxW/widest);
@@ -1205,11 +1218,11 @@ function renderTextCard(m, W, H, revealP){
   const chipText = isLightColor(accent) ? "#241E3F" : "#FFFFFF";   // readable on the accent chip
   let gi = 0;
   lines.forEach((ws,ri)=>{
-    const wws = ws.map(w=>g.measureText(w).width);
+    const wws = ws.map(o=>g.measureText(o.t).width);
     const rowW = wws.reduce((a,b)=>a+b,0) + (ws.length-1)*spaceW;
     let x = W/2 - rowW/2;
     const y = cy + (ri-(lines.length-1)/2)*lineH;
-    ws.forEach((w,k)=>{
+    ws.forEach((o,k)=>{
       const ww = wws[k];
       const startAt = gi/(total+1);
       const wp = clamp01((revealP - startAt) / (1/(total+1) + 0.22));
@@ -1222,12 +1235,12 @@ function renderTextCard(m, W, H, revealP){
         g.rotate((gi%2===0 ? -0.02 : 0.02));
         g.scale(e, e);
         g.shadowColor = "rgba(0,0,0,.35)"; g.shadowBlur = fontPx*0.35; g.shadowOffsetY = fontPx*0.07;
-        g.fillStyle = accent;
+        g.fillStyle = o.emph ? "#FFFFFF" : accent;
         roundRectPath(g, -ww/2 - pad, -fontPx*0.62, ww + pad*2, fontPx*1.24, fontPx*0.22);
         g.fill();
         g.shadowColor = "transparent"; g.shadowBlur = 0; g.shadowOffsetY = 0;
-        g.fillStyle = chipText;
-        g.fillText(w, -ww/2, 0);
+        g.fillStyle = o.emph ? accent : chipText;
+        g.fillText(o.t, -ww/2, 0);
         g.restore();
       }
       x += ww + spaceW; gi++;
