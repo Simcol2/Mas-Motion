@@ -268,6 +268,8 @@
         <h3 id="textEditTitle" style="color:var(--blue)">Text slide</h3>
         <label>Text</label>
         <textarea id="teText" rows="2" maxlength="90" style="width:100%; background:#fff; border:1.5px solid var(--line); color:var(--ink); border-radius:10px; padding:9px 10px; font-family:'Sora',sans-serif; font-size:14px; resize:vertical;"></textarea>
+        <label for="teBgVideo">Faint background video (shows through at ~20%)</label>
+        <select id="teBgVideo"><option value="">— none —</option></select>
         <label for="teBoxTL">Video in the top-left box</label>
         <select id="teBoxTL"><option value="">— none —</option></select>
         <label for="teBoxBR">Video in the bottom-right box</label>
@@ -823,7 +825,7 @@ function getLines(){ return [...textLines.querySelectorAll("input")].map(i=>i.va
 function addTextSlide(text, where){
   text = (text||"").trim();
   if(!text){ statusEl.textContent = "Type some text for the slide first."; return; }
-  const slide = {kind:"text", text, boxTL:null, boxBR:null};
+  const slide = {kind:"text", text, boxTL:null, boxBR:null, bgVideo:null};
   if(where==="start") media.unshift(slide); else media.push(slide);
   closeTrim(); renderThumbs(); repaintIdle(); scheduleAutosave();
   statusEl.innerHTML = `Text slide added — use the ← → arrows on its tile to move it anywhere.`;
@@ -840,6 +842,7 @@ document.getElementById("addTextSlide").addEventListener("click", ()=>{
 /* ---------------- text slide editor (edit text + pick corner-box videos) ---------------- */
 const textEditPanel = document.getElementById("textEditPanel");
 const teText = document.getElementById("teText"), teBoxTL = document.getElementById("teBoxTL"), teBoxBR = document.getElementById("teBoxBR");
+const teBgVideo = document.getElementById("teBgVideo");
 let textEditIndex = -1;
 function videoClipOptions(selectedId){
   let html = `<option value="">— none —</option>`;
@@ -857,6 +860,7 @@ function openTextEdit(i){
   textEditIndex = i;
   closeTrim();
   teText.value = m.text || "";
+  teBgVideo.innerHTML = videoClipOptions(m.bgVideo);
   teBoxTL.innerHTML = videoClipOptions(m.boxTL);
   teBoxBR.innerHTML = videoClipOptions(m.boxBR);
   document.getElementById("textEditTitle").textContent = `Text slide ${i+1}`;
@@ -869,6 +873,7 @@ teText.addEventListener("input", ()=>{
   if(m._card) m._card._tok = -1;   // force the card to re-render
   renderThumbs(); repaintIdle(); scheduleAutosave();
 });
+teBgVideo.addEventListener("change", ()=>{ const m=media[textEditIndex]; if(m){ m.bgVideo = teBgVideo.value||null; if(m._card) m._card._tok=-1; repaintIdle(); scheduleAutosave(); } });
 teBoxTL.addEventListener("change", ()=>{ const m=media[textEditIndex]; if(m){ m.boxTL = teBoxTL.value||null; repaintIdle(); scheduleAutosave(); } });
 teBoxBR.addEventListener("change", ()=>{ const m=media[textEditIndex]; if(m){ m.boxBR = teBoxBR.value||null; repaintIdle(); scheduleAutosave(); } });
 document.getElementById("teDone").addEventListener("click", closeTextEdit);
@@ -1202,7 +1207,10 @@ function renderTextCard(m, W, H, revealP, exitP=0){
   const g = c.getContext("2d");
   const bg = cBg.value, accent = cAccent.value, txtCol = cText.value, fam = fontSel.value;
   g.clearRect(0,0,W,H);
-  g.fillStyle = bg; g.fillRect(0,0,W,H);
+  // if a faint background clip is set, the backdrop is ~80% opaque so the video shows through
+  const hasBgVid = !!(m.bgVideo && mediaById(m.bgVideo));
+  g.fillStyle = hasBgVid ? hexA(bg, 0.8) : bg;
+  g.fillRect(0,0,W,H);
   // template stripe accents, top and bottom
   const sh = Math.round(H*0.014), seg = W/currentStripe.length;
   currentStripe.forEach((col,i)=>{ g.fillStyle=col; g.fillRect(i*seg,0,seg+1,sh); g.fillRect(i*seg,H-sh,seg+1,sh); });
@@ -1479,9 +1487,9 @@ function renderMainFrame(t, W, H){
   const order = runOrder.length===media.length ? runOrder : media.map((_,i)=>i);
   const realIdx = order[idx], realNextIdx = order[idx+1];
 
-  // clips playing inside a text slide's corner boxes must keep running (not be paused)
+  // clips playing inside a text slide's corner boxes or as its faint background must keep running
   const curSlide = media[realIdx];
-  const boxIds = (curSlide && curSlide.kind==="text") ? [curSlide.boxTL, curSlide.boxBR].filter(Boolean) : [];
+  const boxIds = (curSlide && curSlide.kind==="text") ? [curSlide.boxTL, curSlide.boxBR, curSlide.bgVideo].filter(Boolean) : [];
 
   media.forEach((mm,i)=>{
     if(mm.kind!=="vid") return;
@@ -1528,6 +1536,14 @@ function renderMainFrame(t, W, H){
   // an incoming text slide slides in blank, then reveals once it's centred (avoids a
   // double-reveal and keeps the line-by-line entrance clearly visible)
   if(nx && nx.kind==="text") renderTextCard(nx, W, H, 0, 0);
+
+  // faint background video behind a text slide: draw the clip full-frame, then the card's
+  // ~80%-opaque white lets it show through at about 20%.
+  if(m.kind==="text" && m.bgVideo){
+    const bv = mediaById(m.bgVideo);
+    if(bv && bv.kind==="vid") coverDraw(bv.el, W, H, 1, 0, 0, 1);
+  }
+
   // draw from downscaled copies for images (cheap); videos fall through to their element
   const mEl = imgSrc(m), nxEl = nx ? imgSrc(nx) : null;
 
@@ -2320,7 +2336,7 @@ async function buildProjectRecord(name){
       m.kind==="vid"  ? (m.saveBlob
           ? { kind:"vid", blob:m.saveBlob, trim:{start:0, len:m.trim.len}, dur:m.trim.len, speed:m.speed||1, id:m.id }
           : { kind:"vid", blob: await blobOf(m), trim:m.trim, dur:m.dur, speed:m.speed||1, id:m.id })
-      : m.kind==="text" ? { kind:"text", text:m.text, boxTL:m.boxTL||null, boxBR:m.boxBR||null }
+      : m.kind==="text" ? { kind:"text", text:m.text, boxTL:m.boxTL||null, boxBR:m.boxBR||null, bgVideo:m.bgVideo||null }
       : { kind:"img", blob: await blobOf(m) }
     )),
     filmstrip: await blobsFromSet(filmstripSet),
@@ -2395,7 +2411,7 @@ async function applyProjectRecord(project){
   media.length = 0;
   filmstripSet.arr.length = 0; shuffleSet.arr.length = 0; bradySet.arr.length = 0;
   for(const m of project.media){
-    if(m.kind==="text"){ media.push({kind:"text", text:m.text, boxTL:m.boxTL||null, boxBR:m.boxBR||null}); continue; }
+    if(m.kind==="text"){ media.push({kind:"text", text:m.text, boxTL:m.boxTL||null, boxBR:m.boxBR||null, bgVideo:m.bgVideo||null}); continue; }
     const url = URL.createObjectURL(m.blob);
     if(m.kind==="img"){
       await new Promise(res=>{
