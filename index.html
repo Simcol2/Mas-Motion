@@ -561,6 +561,20 @@ function bgVideoForText(m){
   if(a1 && a1.kind==="vid") return a1;
   return null;
 }
+/* Clips a text slide has been EXPLICITLY assigned to play behind it. Such a clip is shown only
+   as that faint backdrop and is dropped from the main reel, so it never plays a second time as
+   its own slide (the "the clip repeated again" complaint). Auto-chosen backdrops aren't hidden —
+   we don't want to silently remove a clip the user never asked to reuse. */
+function hiddenBgIds(){
+  const s = new Set();
+  for(const m of media){
+    if(m.kind==="text" && m.bgVideo && m.bgVideo!=="off"){
+      const bv = mediaById(m.bgVideo);
+      if(bv && bv.kind==="vid" && bv.id) s.add(bv.id);
+    }
+  }
+  return s;
+}
 let musicEl = null, musicSrcNode = null, musicGain = null, sharedAudioCtx = null;
 let beats = [];
 let boundaries = [];
@@ -579,7 +593,10 @@ function shuffleOrder(n){
 /* Slides now play in EXACTLY the order they're arranged in the tile strip — no reshuffling.
    The order sticks across every preview and export; rearrange with the ← → tile arrows. */
 function buildSlideOrder(){
-  return Array.from({length: media.length}, (_,i)=>i);
+  const hidden = hiddenBgIds();
+  const out = [];
+  media.forEach((m,i)=>{ if(!(m.kind==="vid" && m.id && hidden.has(m.id))) out.push(i); });
+  return out;
 }
 
 const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
@@ -1020,10 +1037,12 @@ function detectBeats(buf){
    - a text slide is ~0.5s shorter than an even share,
    - photo slides share out the rest toward the target length. */
 function computeBoundaries(){
-  const n = media.length, dur = +durRange.value;
+  const order = buildSlideOrder();          // only slides that actually play on the main reel
+  const n = order.length, dur = +durRange.value;
   if(n <= 0) return [0, Math.max(2, dur)];
   const even = dur/n;
-  const durs = media.map(m=>{
+  const durs = order.map(idx=>{
+    const m = media[idx];
     if(m.kind==="text") return Math.max(1.6, even - 0.5);
     if(m.kind==="vid")  return Math.max(0.6, (m.trim ? m.trim.len : even) / (m.speed || 1));
     return -1; // photo — filled below
@@ -1120,15 +1139,17 @@ let lastRunPlanSig = null;
    the underlying content actually changes (media/lines added or removed, motion style
    switched) — pass force=true to deliberately roll a fresh mix. */
 function buildRunPlan(force=false){
+  runOrder = buildSlideOrder();
   boundaries = computeBoundaries();
   const style = motionSel.value;
   const lines = getLines();
-  const sig = [media.length, lines.length, style, shuffleSet.arr.length].join("|");
-  if(!force && sig === lastRunPlanSig && runOrder.length === media.length) return;
+  // include which clips are pinned behind text: changing a backdrop changes the reel's slide set
+  const bgSig = media.map(m=> m.kind==="text" ? (m.bgVideo||"") : "").join(",");
+  const sig = [media.length, runOrder.length, lines.length, style, shuffleSet.arr.length, bgSig].join("|");
+  if(!force && sig === lastRunPlanSig) return;
   lastRunPlanSig = sig;
 
-  runOrder = buildSlideOrder();
-  const nT = Math.max(0, media.length - 1);
+  const nT = Math.max(0, runOrder.length - 1);
   transSeq = [];
   for(let i=0;i<nT;i++){
     transSeq.push(style==="shuffle" ? TRANSITIONS[Math.floor(Math.random()*TRANSITIONS.length)] : style);
@@ -1417,7 +1438,7 @@ function slideIndexAt(t){
   for(let i=0;i<boundaries.length-1;i++){
     if(t >= boundaries[i] && t < boundaries[i+1]) return i;
   }
-  return media.length - 1;
+  return Math.max(0, boundaries.length - 2);
 }
 /* Main-slide video: play the trimmed clip through ONCE, starting fresh at the slide's start,
    and HOLD the last frame if there's any leftover time — never loop back (that jump-back is
@@ -1457,7 +1478,7 @@ function loopVideo(m){
    (see renderMainFrame), so at most the current + next clip ever decode at the same time.
    The wait is capped so a clip that never signals ready can't stall the whole run. */
 async function primeVideos(){
-  const order = runOrder.length===media.length ? runOrder : media.map((_,i)=>i);
+  const order = (runOrder && runOrder.length) ? runOrder : media.map((_,i)=>i);
   const first = media[order[0]];
   // make sure nothing else is holding a decoder
   media.forEach(m=>{ if(m.kind==="vid" && m.el!==(first&&first.el)) { try{ m.el.pause(); }catch(e){} } });
@@ -1503,11 +1524,11 @@ function renderMainFrame(t, W, H){
   ctx.fillStyle = cBg.value; ctx.fillRect(0,0,W,H);
   if(!media.length){ drawIdleCard(W,H,accent,fam); addFilmLook(W,H); return; }
 
-  const idx = Math.min(media.length-1, slideIndexAt(t));
+  const order = (runOrder && runOrder.length) ? runOrder : media.map((_,i)=>i);
+  const idx = Math.min(order.length-1, slideIndexAt(t));
   const sd = boundaries[idx+1] - boundaries[idx];
   const local = t - boundaries[idx];
   const prog = Math.min(1, local/sd);
-  const order = runOrder.length===media.length ? runOrder : media.map((_,i)=>i);
   const realIdx = order[idx], realNextIdx = order[idx+1];
 
   // clips playing inside a text slide's corner boxes or as its faint background must keep running
@@ -1516,7 +1537,7 @@ function renderMainFrame(t, W, H){
   const boxIds = (curSlide && curSlide.kind==="text") ? [curSlide.boxTL, curSlide.boxBR, curBg?curBg.id:null].filter(Boolean) : [];
 
   const trW = Math.min(0.45, sd/2.5);
-  const inTrans = idx < media.length-1 && local > sd - trW;
+  const inTrans = idx < order.length-1 && local > sd - trW;
 
   media.forEach((mm,i)=>{
     if(mm.kind!=="vid") return;
