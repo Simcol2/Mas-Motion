@@ -241,6 +241,11 @@
       <input type="file" id="fileInput" class="sr" accept="image/*,video/*" multiple>
       <div class="thumbs" id="thumbs"></div>
 
+      <div id="bankWrap" style="display:none; margin-top:12px">
+        <h3 style="margin:0 0 6px; font-size:.82rem; opacity:.85">🎞 Your clip bank — tap ＋ to reuse without re-uploading</h3>
+        <div class="thumbs" id="bankThumbs"></div>
+      </div>
+
       <div class="trim-panel" id="trimPanel">
         <h3 id="trimTitle">Trim clip</h3>
         <label>Clip length</label>
@@ -487,10 +492,15 @@
     <div class="progress"><i id="progFill"></i></div>
     <p class="status" id="status">Add media to begin.</p>
     <a class="btn btn-main dl" id="dlLink" download="mas-motion-reel.webm">⬇ Download your video</a>
+    <p id="verTag" style="margin:6px 0 0; font-size:.62rem; opacity:.45; text-align:center"></p>
   </div>
 </main>
 
 <script>
+/* App version stamp — bumped on every deploy so anyone can see at a glance which build a
+   device is actually running (stale caches were making "is the fix live?" unanswerable). */
+const APP_VERSION = "2026-07-23.1";
+document.getElementById("verTag").textContent = "Mas Motion build " + APP_VERSION;
 /* ---------------- storage (safe: falls back to memory if blocked) -------- */
 const memStore = {};
 const store = {
@@ -629,9 +639,11 @@ function addFiles(list){
       el.onloadedmetadata = ()=>{
         if(done) return; done = true;
         const dur = (el.duration && isFinite(el.duration)) ? el.duration : 3;
-        const m = {kind:"vid", el, url, dur, trim:{start:0, len:Math.min(3, dur)}, speed:1, id:newId(), blob:f};
+        const fp = f.name + "|" + f.size + "|" + (f.lastModified||0);
+        const m = {kind:"vid", el, url, dur, trim:{start:0, len:Math.min(3, dur)}, speed:1, id:newId(), blob:f, fp};
         media.push(m);
         renderThumbs(); repaintIdle(); scheduleAutosave(); queuePoster(m);
+        bankStash(m, f);   // remember this upload in the clip bank (deduped, best-effort)
       };
       el.onerror = ()=>{
         if(done) return; done = true;
@@ -694,6 +706,7 @@ function capturePoster(m){
           posterCanvas.width = Wp; posterCanvas.height = Hp;
           posterCanvas.getContext("2d").drawImage(v, 0, 0, Wp, Hp);
           m.poster = posterCanvas.toDataURL("image/jpeg", 0.6);
+          if(m.fp) bankSetPoster(m.fp, m.poster);   // give the bank tile the same thumbnail
         }
       }catch(e){}
       try{ v.pause(); v.preload = "metadata"; }catch(e){}   // release the decoder again
@@ -712,6 +725,100 @@ function capturePoster(m){
     }catch(e){ finish(); }
   });
 }
+
+/* ---------------- clip bank: every upload is remembered on this device ----------------
+   Once a clip has been uploaded it lives in the bank (deduped by name+size+date) and can be
+   dropped back into any reel with one tap — no re-uploading the same file over and over.
+   All best-effort: a full disk or blocked IndexedDB never breaks uploading itself. */
+let bankList = [];   // light metadata currently shown in the bank strip
+async function bankStash(m, f){
+  try{
+    const db = await openProjectsDB();
+    const exists = await new Promise(res=>{
+      const r = db.transaction("clips","readonly").objectStore("clips").get(m.fp);
+      r.onsuccess=()=>res(!!r.result); r.onerror=()=>res(false);
+    });
+    if(!exists){
+      await new Promise((res,rej)=>{
+        const tx = db.transaction(["clips","clipBlobs"],"readwrite");
+        tx.objectStore("clips").put({fp:m.fp, name:f.name, dur:m.dur, poster:m.poster||null, addedAt:Date.now()});
+        tx.objectStore("clipBlobs").put({fp:m.fp, blob:f});
+        tx.oncomplete=res; tx.onerror=()=>rej(tx.error);
+      });
+    }
+    refreshBank();
+  }catch(e){ /* bank is a convenience — never let it break an upload */ }
+}
+async function bankSetPoster(fp, poster){
+  try{
+    const db = await openProjectsDB();
+    const st = db.transaction("clips","readwrite").objectStore("clips");
+    const r = st.get(fp);
+    r.onsuccess = ()=>{ const rec=r.result; if(rec && !rec.poster){ rec.poster=poster; st.put(rec); const el=document.querySelector(`#bankThumbs img[data-fp="${CSS.escape(fp)}"]`); if(el) el.src=poster; } };
+  }catch(e){}
+}
+async function bankForget(fp){
+  try{
+    const db = await openProjectsDB();
+    await new Promise((res,rej)=>{
+      const tx = db.transaction(["clips","clipBlobs"],"readwrite");
+      tx.objectStore("clips").delete(fp); tx.objectStore("clipBlobs").delete(fp);
+      tx.oncomplete=res; tx.onerror=()=>rej(tx.error);
+    });
+    refreshBank();
+  }catch(e){}
+}
+async function bankUse(fp){
+  try{
+    const db = await openProjectsDB();
+    const rec = await new Promise(res=>{ const r=db.transaction("clipBlobs","readonly").objectStore("clipBlobs").get(fp); r.onsuccess=()=>res(r.result); r.onerror=()=>res(null); });
+    const meta = bankList.find(b=>b.fp===fp);
+    if(!rec || !rec.blob){ statusEl.textContent = "That clip's file is no longer stored here — upload it once more."; return; }
+    const url = URL.createObjectURL(rec.blob);
+    const el = document.createElement("video");
+    el.muted = true; el.playsInline = true; el.preload = "metadata";
+    let done=false;
+    const push = (dur)=>{
+      if(done) return; done=true;
+      const m = {kind:"vid", el, url, dur, trim:{start:0, len:Math.min(3, dur)}, speed:1, id:newId(), blob:rec.blob, fp, poster:(meta&&meta.poster)||null};
+      media.push(m);
+      renderThumbs(); repaintIdle(); scheduleAutosave();
+      if(!m.poster) queuePoster(m);
+      statusEl.textContent = "Added from your clip bank — no re-upload needed.";
+    };
+    el.onloadedmetadata = ()=> push((el.duration && isFinite(el.duration)) ? el.duration : (meta&&meta.dur)||3);
+    el.onerror = ()=>{ if(!done){ done=true; statusEl.textContent = "Couldn't reopen that clip — try uploading it again."; } };
+    setTimeout(()=> push((meta&&meta.dur)||3), 6000);
+    el.src = url;
+  }catch(e){}
+}
+async function refreshBank(){
+  try{
+    const db = await openProjectsDB();
+    bankList = await new Promise(res=>{ const r=db.transaction("clips","readonly").objectStore("clips").getAll(); r.onsuccess=()=>res(r.result||[]); r.onerror=()=>res([]); });
+    bankList.sort((a,b)=> (b.addedAt||0)-(a.addedAt||0));
+    const wrap = document.getElementById("bankWrap"), strip = document.getElementById("bankThumbs");
+    if(!wrap || !strip) return;
+    wrap.style.display = bankList.length ? "block" : "none";
+    strip.innerHTML = "";
+    bankList.forEach((r,i)=>{
+      const t = document.createElement("div"); t.className = "thumb";
+      t.innerHTML = `<img src="${r.poster || BLANK_POSTER}" data-fp="${String(r.fp).replace(/"/g,"&quot;")}" alt="${String(r.name||"clip").replace(/"/g,"&quot;")}">
+        <span class="vid-badge">${Math.round(r.dur||0)}s</span>
+        <div class="tools">
+          <button title="Add to reel" data-a="use" data-i="${i}">＋</button>
+          <button class="del" title="Forget this clip" data-a="forget" data-i="${i}">×</button>
+        </div>`;
+      strip.appendChild(t);
+    });
+    strip.querySelectorAll("button").forEach(b=>b.addEventListener("click", ()=>{
+      const r = bankList[+b.dataset.i]; if(!r) return;
+      if(b.dataset.a==="use") bankUse(r.fp);
+      else if(confirm(`Forget "${r.name}" from your clip bank? (Doesn't touch your current reel.)`)) bankForget(r.fp);
+    }));
+  }catch(e){}
+}
+
 function renderThumbs(){
   const wrap = document.getElementById("thumbs"); wrap.innerHTML = "";
   media.forEach((m,i)=>{
@@ -759,7 +866,11 @@ function openTrim(i){
   // still opens (clicking a clip must never just do nothing)
   const dur = (typeof m.dur==="number" && m.dur>0) ? m.dur : (m.trim.start + m.trim.len) || 3;
   trimIndex = i;
-  trimLen.value = String(Math.round(m.trim.len));
+  // snap to the CLOSEST length the dropdown offers — assigning a value with no matching
+  // <option> (e.g. a 1s clip) left the select empty, which read back as 0 and zeroed the trim
+  const opts = [...trimLen.options].map(o=>+o.value);
+  const closest = opts.reduce((a,b)=> Math.abs(b-m.trim.len)<Math.abs(a-m.trim.len)?b:a);
+  trimLen.value = String(closest);
   trimStart.max = Math.max(0, dur - m.trim.len).toFixed(1);
   trimStart.value = m.trim.start.toFixed(1);
   trimSpeed.value = m.speed || 1;
@@ -2344,8 +2455,15 @@ exportBtn.addEventListener("click", async ()=>{
 /* ---------------- save & resume projects (stored locally on this device) ---------------- */
 function openProjectsDB(){
   return new Promise((resolve,reject)=>{
-    const req = indexedDB.open("masMotionProjects", 1);
-    req.onupgradeneeded = ()=>{ req.result.createObjectStore("projects", {keyPath:"name"}); };
+    const req = indexedDB.open("masMotionProjects", 2);
+    req.onupgradeneeded = ()=>{
+      const db = req.result;
+      if(!db.objectStoreNames.contains("projects")) db.createObjectStore("projects", {keyPath:"name"});
+      // Clip bank: metadata (light, listed in the UI) and blobs (heavy, read one at a time)
+      // are separate stores so opening the bank never loads every video into memory.
+      if(!db.objectStoreNames.contains("clips")) db.createObjectStore("clips", {keyPath:"fp"});
+      if(!db.objectStoreNames.contains("clipBlobs")) db.createObjectStore("clipBlobs", {keyPath:"fp"});
+    };
     req.onsuccess = ()=>resolve(req.result);
     req.onerror = ()=>reject(req.error);
   });
@@ -2369,7 +2487,10 @@ async function blobsFromSet(set){
 let saveBlobBusy = false;
 function trimSig(m){ return m.trim ? (m.trim.start.toFixed(2)+"|"+m.trim.len.toFixed(2)) : ""; }
 async function ensureSaveBlobs(){
-  if(saveBlobBusy) return; saveBlobBusy = true;
+  // Wait for an in-flight pass instead of silently skipping — a manual/Drive save that
+  // skipped here went on to store full ORIGINALS (the old quota-blowing path).
+  while(saveBlobBusy){ await new Promise(r=>setTimeout(r, 200)); }
+  saveBlobBusy = true;
   try{
     for(const m of media){
       if(m.kind!=="vid") continue;
@@ -2383,30 +2504,48 @@ async function ensureSaveBlobs(){
 function recordTrimmed(m){
   return new Promise(resolve=>{
     try{
-      const v = m.el;
-      const vw = v.videoWidth||640, vh = v.videoHeight||360;
-      const sc = Math.min(1, 1280/Math.max(vw,vh));
-      const w = Math.max(2, Math.round(vw*sc)), h = Math.max(2, Math.round(vh*sc));
-      const off = document.createElement("canvas"); off.width=w; off.height=h;
-      const octx = off.getContext("2d");
-      const stream = off.captureStream(30);
-      const mime = ["video/webm;codecs=vp9","video/webm;codecs=vp8","video/webm"].find(t=>MediaRecorder.isTypeSupported(t))||"";
-      const rec = new MediaRecorder(stream, mime?{mimeType:mime, videoBitsPerSecond: 6_000_000}:{});
-      const chunks=[]; rec.ondataavailable=e=>{ if(e.data.size) chunks.push(e.data); };
-      let finished=false, raf=null;
-      const end = m.trim.start + m.trim.len;
-      rec.onstop = ()=> resolve(chunks.length ? new Blob(chunks,{type:mime||"video/webm"}) : null);
-      const finish=()=>{ if(finished) return; finished=true; if(raf) cancelAnimationFrame(raf); try{ v.pause(); }catch(e){} try{ rec.stop(); }catch(e){ resolve(null); } };
-      const draw=()=>{
-        if(playing || recording){ finish(); return; }   // bail if a preview/export starts
-        try{ octx.drawImage(v,0,0,w,h); }catch(e){}
-        if(v.currentTime>=end-0.02 || v.ended){ finish(); return; }
-        raf=requestAnimationFrame(draw);
+      // Re-encode from a CLONE of the clip, never from m.el — the element the preview and
+      // export render from. This background re-encode used to seek/play m.el itself, so
+      // editing a clip then previewing meant two things driving the same video at once:
+      // that was the random freezing/skipping right after making an edit.
+      const v = document.createElement("video");
+      v.muted = true; v.playsInline = true; v.preload = "auto";
+      let finished=false, raf=null, rec=null;
+      const cleanup = ()=>{ try{ v.pause(); v.removeAttribute("src"); v.load(); }catch(e){} };  // release the clone's decoder
+      const bail = ()=>{ if(finished) return; finished=true; if(raf) cancelAnimationFrame(raf); cleanup(); resolve(null); };
+      const finish = ()=>{ if(finished) return; finished=true; if(raf) cancelAnimationFrame(raf); try{ v.pause(); }catch(e){} try{ rec.stop(); }catch(e){ cleanup(); resolve(null); } };
+      v.onerror = bail;
+      v.onloadedmetadata = ()=>{
+        try{
+          const vw = v.videoWidth||640, vh = v.videoHeight||360;
+          const sc = Math.min(1, 1280/Math.max(vw,vh));
+          const w = Math.max(2, Math.round(vw*sc)), h = Math.max(2, Math.round(vh*sc));
+          const off = document.createElement("canvas"); off.width=w; off.height=h;
+          const octx = off.getContext("2d");
+          const stream = off.captureStream(30);
+          const mime = ["video/webm;codecs=vp9","video/webm;codecs=vp8","video/webm"].find(t=>MediaRecorder.isTypeSupported(t))||"";
+          rec = new MediaRecorder(stream, mime?{mimeType:mime, videoBitsPerSecond: 6_000_000}:{});
+          const chunks=[]; rec.ondataavailable=e=>{ if(e.data.size) chunks.push(e.data); };
+          const end = m.trim.start + m.trim.len;
+          rec.onstop = ()=>{ cleanup(); resolve(chunks.length ? new Blob(chunks,{type:mime||"video/webm"}) : null); };
+          const draw=()=>{
+            if(playing || recording){ finish(); return; }   // bail if a preview/export starts
+            try{ octx.drawImage(v,0,0,w,h); }catch(e){}
+            if(v.currentTime>=end-0.02 || v.ended){ finish(); return; }
+            raf=requestAnimationFrame(draw);
+          };
+          // start on whichever readiness signal arrives first — some clips (no seek index)
+          // never fire "seeked", so also listen for canplay and keep a last-resort kick
+          let started=false;
+          const begin=()=>{ if(started||finished) return; started=true; try{ rec.start(); v.playbackRate=1; v.play().then(draw).catch(()=>finish()); }catch(e){ finish(); } };
+          v.addEventListener("seeked", begin);
+          v.addEventListener("canplay", begin);
+          setTimeout(begin, 1500);
+          try{ v.currentTime = Math.max(0.01, m.trim.start); }catch(e){}
+        }catch(e){ bail(); }
       };
-      const onSeeked=()=>{ v.removeEventListener("seeked", onSeeked); try{ rec.start(); v.playbackRate=1; v.play().then(draw).catch(()=>finish()); }catch(e){ finish(); } };
-      v.addEventListener("seeked", onSeeked);
-      try{ v.pause(); v.muted=true; v.currentTime = m.trim.start; }catch(e){ finish(); }
-      setTimeout(finish, m.trim.len*1000 + 5000);
+      setTimeout(()=>{ if(!finished){ if(rec) finish(); else bail(); } }, m.trim.len*1000 + 8000);
+      v.src = m.url;
     }catch(e){ resolve(null); }
   });
 }
@@ -2427,8 +2566,8 @@ async function buildProjectRecord(name){
     name, savedAt: Date.now(),
     media: await Promise.all(media.map(async m=>
       m.kind==="vid"  ? (m.saveBlob
-          ? { kind:"vid", blob:m.saveBlob, trim:{start:0, len:m.trim.len}, dur:m.trim.len, speed:m.speed||1, id:m.id }
-          : { kind:"vid", blob: await blobOf(m), trim:m.trim, dur:m.dur, speed:m.speed||1, id:m.id })
+          ? { kind:"vid", blob:m.saveBlob, trim:{start:0, len:m.trim.len}, dur:m.trim.len, speed:m.speed||1, id:m.id, poster:m.poster||null, fp:m.fp||null }
+          : { kind:"vid", blob: await blobOf(m), trim:m.trim, dur:m.dur, speed:m.speed||1, id:m.id, poster:m.poster||null, fp:m.fp||null })
       : m.kind==="text" ? { kind:"text", text:m.text, boxTL:m.boxTL||null, boxBR:m.boxBR||null, bgVideo:m.bgVideo||null }
       : { kind:"img", blob: await blobOf(m) }
     )),
@@ -2529,7 +2668,7 @@ async function applyProjectRecord(project){
         const el=document.createElement("video");
         el.muted=true; el.playsInline=true; el.preload="metadata";
         let done=false;
-        el.onloadedmetadata=()=>{ if(done)return; done=true; const it={kind:"vid", el, url, dur:m.dur, trim:m.trim, speed:m.speed||1, id:m.id||newId(), blob:m.blob}; it.saveBlob=m.blob; it.saveBlobSig=trimSig(it); media.push(it); res(); };
+        el.onloadedmetadata=()=>{ if(done)return; done=true; const it={kind:"vid", el, url, dur:m.dur, trim:m.trim, speed:m.speed||1, id:m.id||newId(), blob:m.blob, poster:m.poster||null, fp:m.fp||null}; it.saveBlob=m.blob; it.saveBlobSig=trimSig(it); media.push(it); res(); };
         el.onerror=()=>{ if(done)return; done=true; res(); };
         setTimeout(()=>{ if(done)return; done=true; res(); }, 6000);
         el.src=url;
@@ -2821,6 +2960,8 @@ document.fonts.ready.then(repaintIdle);
     }
   }catch(e){}
 })();
+
+refreshBank();   // show previously uploaded clips (the bank) as soon as the app opens
 
 /* Bring back whatever you were last working on — photos, clips, words and settings —
    so a refresh never wipes your uploads. */
