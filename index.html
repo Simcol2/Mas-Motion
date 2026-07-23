@@ -546,19 +546,10 @@ function bgVideoForText(m){
   if(!m || m.kind!=="text") return null;
   if(m.bgVideo==="off") return null;
   if(m.bgVideo){ const bv = mediaById(m.bgVideo); if(bv && bv.kind==="vid") return bv; }
-  const i = media.indexOf(m);
-  // Prefer a clip that is NOT an immediate neighbour. If a text slide borrows the clip that
-  // played right before (or plays right after) it, that clip appears to play a second time
-  // behind the text — which reads as "the video repeated before the next clip". Reaching for
-  // a farther-off clip keeps a faint moving backdrop without echoing the adjacent slide.
-  for(let d=2; d<media.length; d++){
-    const before = media[i-d]; if(before && before.kind==="vid") return before;
-    const after = media[i+d];  if(after && after.kind==="vid") return after;
-  }
-  // only fall back to an adjacent clip when there's genuinely no other video to use
-  const b1 = media[i-1], a1 = media[i+1];
-  if(b1 && b1.kind==="vid") return b1;
-  if(a1 && a1.kind==="vid") return a1;
+  // No AUTOMATIC backdrop. Auto-picking a clip meant some clip always decoded behind the text
+  // (stealing a decoder from the next clip's pre-roll — the choppy transitions) and that clip
+  // also appeared elsewhere as its own slide (the "repeat"). A text slide now only gets a faint
+  // video behind it when you explicitly pick one, and that pinned clip is dropped from the reel.
   return null;
 }
 /* Clips a text slide has been EXPLICITLY assigned to play behind it. Such a clip is shown only
@@ -1040,7 +1031,9 @@ function computeBoundaries(){
   const order = buildSlideOrder();          // only slides that actually play on the main reel
   const n = order.length, dur = +durRange.value;
   if(n <= 0) return [0, Math.max(2, dur)];
-  const even = dur/n;
+  // pace text length off the FULL slide count, not the filtered one — pinning a clip behind a
+  // text slide shouldn't lengthen the remaining text slides
+  const even = dur / Math.max(1, media.length);
   const durs = order.map(idx=>{
     const m = media[idx];
     if(m.kind==="text") return Math.max(1.6, even - 0.5);
@@ -1552,7 +1545,12 @@ function renderMainFrame(t, W, H){
     if(isPreRoll){ primeFrame(mm); return; }
     if(!mm.el.paused) mm.el.pause();
   });
-  boxIds.forEach(id=>{ const vm = mediaById(id); if(vm && vm.kind==="vid") loopVideo(vm); });
+  boxIds.forEach(id=>{
+    const vm = mediaById(id); if(!vm || vm.kind!=="vid") return;
+    // the faint full-screen backdrop plays through ONCE and holds its last frame (no loop-back,
+    // which is what read as the clip "repeating"); small corner PiP boxes still loop quietly
+    if(curBg && id===curBg.id) syncVideo(vm, local); else loopVideo(vm);
+  });
 
   const m = media[realIdx];
   if(m.kind==="vid") syncVideo(m, local);
