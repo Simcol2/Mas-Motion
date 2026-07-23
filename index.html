@@ -546,10 +546,16 @@ function bgVideoForText(m){
   if(!m || m.kind!=="text") return null;
   if(m.bgVideo==="off") return null;
   if(m.bgVideo){ const bv = mediaById(m.bgVideo); if(bv && bv.kind==="vid") return bv; }
-  // No AUTOMATIC backdrop. Auto-picking a clip meant some clip always decoded behind the text
-  // (stealing a decoder from the next clip's pre-roll — the choppy transitions) and that clip
-  // also appeared elsewhere as its own slide (the "repeat"). A text slide now only gets a faint
-  // video behind it when you explicitly pick one, and that pinned clip is dropped from the reel.
+  // Automatic translucent backdrop: use the NEAREST clip, searching outward from this text slide.
+  // Nearest is chosen on purpose — that clip is the one most likely already decoded (warm), so it
+  // doesn't fight the next clip's pre-roll for the phone's video decoders (that was the choppy
+  // transition). If you want a specific clip behind a slide, pin it and it's used instead (and a
+  // pinned clip is dropped from the main reel so it doesn't play twice).
+  const i = media.indexOf(m);
+  for(let d=1; d<media.length; d++){
+    const before = media[i-d]; if(before && before.kind==="vid") return before;
+    const after = media[i+d];  if(after && after.kind==="vid") return after;
+  }
   return null;
 }
 /* Clips a text slide has been EXPLICITLY assigned to play behind it. Such a clip is shown only
@@ -1248,10 +1254,11 @@ function renderTextCard(m, W, H, revealP, exitP=0){
   const g = c.getContext("2d");
   const bg = cBg.value, accent = cAccent.value, txtCol = cText.value, fam = fontSel.value;
   g.clearRect(0,0,W,H);
-  // when a clip shows faintly behind, the backdrop is ~80% opaque so the screen stays mostly
-  // white with crisp text and the video only whispers through (about a fifth visible)
+  // when a clip shows behind, the backdrop is ~60% opaque so the video clearly reads THROUGH the
+  // white (translucent) while the text stays legible. (Tune this one number if you want the video
+  // stronger or fainter — lower = more video, higher = more white.)
   const hasBgVid = !!bgVideoForText(m);
-  g.fillStyle = hasBgVid ? hexA(bg, 0.80) : bg;
+  g.fillStyle = hasBgVid ? hexA(bg, 0.60) : bg;
   g.fillRect(0,0,W,H);
   // template stripe accents, top and bottom
   const sh = Math.round(H*0.014), seg = W/currentStripe.length;
@@ -2797,6 +2804,23 @@ fillPresetSelect();
 applyTemplate("Girly Carnival");
 refreshProjectList();
 document.fonts.ready.then(repaintIdle);
+
+/* Ask the browser to KEEP this site's data rather than silently evicting it when the phone is
+   low on space. Without this, a mobile browser can wipe the whole origin under storage pressure
+   — taking your saved project AND your pasted Google Client ID with it. That eviction is why
+   uploads/trims/order and the Client ID kept vanishing on refresh, forcing a restart every time.
+   Requesting persistent storage tells the browser this data is worth keeping. */
+(async function requestPersistentStorage(){
+  try{
+    if(navigator.storage && navigator.storage.persist){
+      const already = await navigator.storage.persisted();
+      if(!already){
+        const granted = await navigator.storage.persist();
+        if(granted) console.log("Persistent storage granted — your work won't be evicted.");
+      }
+    }
+  }catch(e){}
+})();
 
 /* Bring back whatever you were last working on — photos, clips, words and settings —
    so a refresh never wipes your uploads. */
