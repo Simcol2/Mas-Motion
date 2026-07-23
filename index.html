@@ -546,12 +546,25 @@ function bgVideoForText(m){
   if(!m || m.kind!=="text") return null;
   if(m.bgVideo==="off") return null;
   if(m.bgVideo){ const bv = mediaById(m.bgVideo); if(bv && bv.kind==="vid") return bv; }
-  const i = media.indexOf(m);
-  for(let d=1; d<media.length; d++){
-    const before = media[i-d]; if(before && before.kind==="vid") return before;
-    const after = media[i+d];  if(after && after.kind==="vid") return after;
-  }
+  // No AUTOMATIC backdrop. Auto-picking a clip meant some clip always decoded behind the text
+  // (stealing a decoder from the next clip's pre-roll — the choppy transitions) and that clip
+  // also appeared elsewhere as its own slide (the "repeat"). A text slide now only gets a faint
+  // video behind it when you explicitly pick one, and that pinned clip is dropped from the reel.
   return null;
+}
+/* Clips a text slide has been EXPLICITLY assigned to play behind it. Such a clip is shown only
+   as that faint backdrop and is dropped from the main reel, so it never plays a second time as
+   its own slide (the "the clip repeated again" complaint). Auto-chosen backdrops aren't hidden —
+   we don't want to silently remove a clip the user never asked to reuse. */
+function hiddenBgIds(){
+  const s = new Set();
+  for(const m of media){
+    if(m.kind==="text" && m.bgVideo && m.bgVideo!=="off"){
+      const bv = mediaById(m.bgVideo);
+      if(bv && bv.kind==="vid" && bv.id) s.add(bv.id);
+    }
+  }
+  return s;
 }
 let musicEl = null, musicSrcNode = null, musicGain = null, sharedAudioCtx = null;
 let beats = [];
@@ -571,7 +584,10 @@ function shuffleOrder(n){
 /* Slides now play in EXACTLY the order they're arranged in the tile strip — no reshuffling.
    The order sticks across every preview and export; rearrange with the ← → tile arrows. */
 function buildSlideOrder(){
-  return Array.from({length: media.length}, (_,i)=>i);
+  const hidden = hiddenBgIds();
+  const out = [];
+  media.forEach((m,i)=>{ if(!(m.kind==="vid" && m.id && hidden.has(m.id))) out.push(i); });
+  return out;
 }
 
 const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
@@ -730,14 +746,19 @@ const trimSpeed = document.getElementById("trimSpeed"), trimSpeedLabel = documen
 const trimReadout = document.getElementById("trimReadout");
 
 function openTrim(i){
-  trimIndex = i;
   const m = media[i];
+  if(!m || m.kind!=="vid") return;
+  if(!m.trim) m.trim = {start:0, len:Math.min(3, m.dur||3)};
+  // a restored clip whose metadata never loaded can be missing .dur — fall back so the editor
+  // still opens (clicking a clip must never just do nothing)
+  const dur = (typeof m.dur==="number" && m.dur>0) ? m.dur : (m.trim.start + m.trim.len) || 3;
+  trimIndex = i;
   trimLen.value = String(Math.round(m.trim.len));
-  trimStart.max = Math.max(0, m.dur - m.trim.len).toFixed(1);
+  trimStart.max = Math.max(0, dur - m.trim.len).toFixed(1);
   trimStart.value = m.trim.start.toFixed(1);
   trimSpeed.value = m.speed || 1;
   trimSpeedLabel.textContent = (m.speed || 1) + "×";
-  document.getElementById("trimTitle").textContent = `Trim clip ${i+1} (${m.dur.toFixed(1)}s total)`;
+  document.getElementById("trimTitle").textContent = `Trim clip ${i+1} (${dur.toFixed(1)}s total)`;
   trimPanel.classList.add("open");
   updateTrimReadout(); renderThumbs();
 }
@@ -1012,10 +1033,14 @@ function detectBeats(buf){
    - a text slide is ~0.5s shorter than an even share,
    - photo slides share out the rest toward the target length. */
 function computeBoundaries(){
-  const n = media.length, dur = +durRange.value;
+  const order = buildSlideOrder();          // only slides that actually play on the main reel
+  const n = order.length, dur = +durRange.value;
   if(n <= 0) return [0, Math.max(2, dur)];
-  const even = dur/n;
-  const durs = media.map(m=>{
+  // pace text length off the FULL slide count, not the filtered one — pinning a clip behind a
+  // text slide shouldn't lengthen the remaining text slides
+  const even = dur / Math.max(1, media.length);
+  const durs = order.map(idx=>{
+    const m = media[idx];
     if(m.kind==="text") return Math.max(1.6, even - 0.5);
     if(m.kind==="vid")  return Math.max(0.6, (m.trim ? m.trim.len : even) / (m.speed || 1));
     return -1; // photo — filled below
@@ -1112,15 +1137,17 @@ let lastRunPlanSig = null;
    the underlying content actually changes (media/lines added or removed, motion style
    switched) — pass force=true to deliberately roll a fresh mix. */
 function buildRunPlan(force=false){
+  runOrder = buildSlideOrder();
   boundaries = computeBoundaries();
   const style = motionSel.value;
   const lines = getLines();
-  const sig = [media.length, lines.length, style, shuffleSet.arr.length].join("|");
-  if(!force && sig === lastRunPlanSig && runOrder.length === media.length) return;
+  // include which clips are pinned behind text: changing a backdrop changes the reel's slide set
+  const bgSig = media.map(m=> m.kind==="text" ? (m.bgVideo||"") : "").join(",");
+  const sig = [media.length, runOrder.length, lines.length, style, shuffleSet.arr.length, bgSig].join("|");
+  if(!force && sig === lastRunPlanSig) return;
   lastRunPlanSig = sig;
 
-  runOrder = buildSlideOrder();
-  const nT = Math.max(0, media.length - 1);
+  const nT = Math.max(0, runOrder.length - 1);
   transSeq = [];
   for(let i=0;i<nT;i++){
     transSeq.push(style==="shuffle" ? TRANSITIONS[Math.floor(Math.random()*TRANSITIONS.length)] : style);
@@ -1221,10 +1248,10 @@ function renderTextCard(m, W, H, revealP, exitP=0){
   const g = c.getContext("2d");
   const bg = cBg.value, accent = cAccent.value, txtCol = cText.value, fam = fontSel.value;
   g.clearRect(0,0,W,H);
-  // when a clip shows faintly behind, the backdrop is ~65% opaque so the video reads clearly
-  // (about a third visible) while the screen stays mostly white with crisp text
+  // when a clip shows faintly behind, the backdrop is ~80% opaque so the screen stays mostly
+  // white with crisp text and the video only whispers through (about a fifth visible)
   const hasBgVid = !!bgVideoForText(m);
-  g.fillStyle = hasBgVid ? hexA(bg, 0.65) : bg;
+  g.fillStyle = hasBgVid ? hexA(bg, 0.80) : bg;
   g.fillRect(0,0,W,H);
   // template stripe accents, top and bottom
   const sh = Math.round(H*0.014), seg = W/currentStripe.length;
@@ -1409,7 +1436,7 @@ function slideIndexAt(t){
   for(let i=0;i<boundaries.length-1;i++){
     if(t >= boundaries[i] && t < boundaries[i+1]) return i;
   }
-  return media.length - 1;
+  return Math.max(0, boundaries.length - 2);
 }
 /* Main-slide video: play the trimmed clip through ONCE, starting fresh at the slide's start,
    and HOLD the last frame if there's any leftover time — never loop back (that jump-back is
@@ -1449,7 +1476,7 @@ function loopVideo(m){
    (see renderMainFrame), so at most the current + next clip ever decode at the same time.
    The wait is capped so a clip that never signals ready can't stall the whole run. */
 async function primeVideos(){
-  const order = runOrder.length===media.length ? runOrder : media.map((_,i)=>i);
+  const order = (runOrder && runOrder.length) ? runOrder : media.map((_,i)=>i);
   const first = media[order[0]];
   // make sure nothing else is holding a decoder
   media.forEach(m=>{ if(m.kind==="vid" && m.el!==(first&&first.el)) { try{ m.el.pause(); }catch(e){} } });
@@ -1495,11 +1522,11 @@ function renderMainFrame(t, W, H){
   ctx.fillStyle = cBg.value; ctx.fillRect(0,0,W,H);
   if(!media.length){ drawIdleCard(W,H,accent,fam); addFilmLook(W,H); return; }
 
-  const idx = Math.min(media.length-1, slideIndexAt(t));
+  const order = (runOrder && runOrder.length) ? runOrder : media.map((_,i)=>i);
+  const idx = Math.min(order.length-1, slideIndexAt(t));
   const sd = boundaries[idx+1] - boundaries[idx];
   const local = t - boundaries[idx];
   const prog = Math.min(1, local/sd);
-  const order = runOrder.length===media.length ? runOrder : media.map((_,i)=>i);
   const realIdx = order[idx], realNextIdx = order[idx+1];
 
   // clips playing inside a text slide's corner boxes or as its faint background must keep running
@@ -1508,7 +1535,7 @@ function renderMainFrame(t, W, H){
   const boxIds = (curSlide && curSlide.kind==="text") ? [curSlide.boxTL, curSlide.boxBR, curBg?curBg.id:null].filter(Boolean) : [];
 
   const trW = Math.min(0.45, sd/2.5);
-  const inTrans = idx < media.length-1 && local > sd - trW;
+  const inTrans = idx < order.length-1 && local > sd - trW;
 
   media.forEach((mm,i)=>{
     if(mm.kind!=="vid") return;
@@ -1523,7 +1550,12 @@ function renderMainFrame(t, W, H){
     if(isPreRoll){ primeFrame(mm); return; }
     if(!mm.el.paused) mm.el.pause();
   });
-  boxIds.forEach(id=>{ const vm = mediaById(id); if(vm && vm.kind==="vid") loopVideo(vm); });
+  boxIds.forEach(id=>{
+    const vm = mediaById(id); if(!vm || vm.kind!=="vid") return;
+    // the faint full-screen backdrop plays through ONCE and holds its last frame (no loop-back,
+    // which is what read as the clip "repeating"); small corner PiP boxes still loop quietly
+    if(curBg && id===curBg.id) syncVideo(vm, local); else loopVideo(vm);
+  });
 
   const m = media[realIdx];
   if(m.kind==="vid") syncVideo(m, local);
@@ -1858,26 +1890,64 @@ function drawIdleCard(W,H,accent,fam){
 function repaintIdle(){ if(!playing && !recording){ boundaries = media.length ? computeBoundaries() : [0]; renderFrame(0); } }
 
 /* ---------------- logo, watermark, year, outro ---------------- */
-function outroLen(){ return (endLogoOn.checked && logoImg) ? 1.2 : 0; }
+function outroLen(){ return (endLogoOn.checked && logoImg) ? 3.0 : 0; }
 function filmstripLen(){ return (filmstripSegOn.checked && filmstripSet.arr.length) ? filmstripDuration() : 0; }
 function shuffleLen(){ return (shuffleSegOn.checked && shuffleSet.arr.length) ? shuffleDuration() : 0; }
 function bradyLen(){ return (bradySegOn.checked && bradySet.arr.length) ? bradyDuration() : 0; }
 function totalDuration(){ return mainDuration() + filmstripLen() + shuffleLen() + bradyLen() + outroLen(); }
 
-function drawOutroCard(lt, W, H){
-  ctx.fillStyle = cBg.value; ctx.fillRect(0,0,W,H);
-  const p = clamp01(lt/0.35);
-  const s = 0.85 + 0.15*easeOutBack(p);
+/* A four-point sparkle (concave star) with a soft glow — used to twinkle around the end logo. */
+function drawSparkle(x, y, r, rot, alpha, col){
+  if(r<=0 || alpha<=0.01) return;
   ctx.save();
-  ctx.globalAlpha = p;
-  ctx.translate(W/2, H/2); ctx.scale(s,s);
+  ctx.translate(x,y); ctx.rotate(rot);
+  ctx.globalAlpha = clamp01(alpha);
+  ctx.fillStyle = col;
+  ctx.shadowColor = col; ctx.shadowBlur = r*1.4;
+  const w = r*0.16;
+  ctx.beginPath();
+  ctx.moveTo(0,-r);
+  ctx.quadraticCurveTo(w,-w, r,0);
+  ctx.quadraticCurveTo(w,w, 0,r);
+  ctx.quadraticCurveTo(-w,w, -r,0);
+  ctx.quadraticCurveTo(-w,-w, 0,-r);
+  ctx.closePath(); ctx.fill();
+  // bright pinpoint centre
+  ctx.shadowBlur = 0; ctx.fillStyle = "#FFFFFF"; ctx.globalAlpha = clamp01(alpha)*0.9;
+  ctx.beginPath(); ctx.arc(0,0, r*0.16, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+function drawOutroCard(lt, W, H){
+  const OL = outroLen();
+  ctx.fillStyle = cBg.value; ctx.fillRect(0,0,W,H);
+  const fade = clamp01(lt/0.45);                 // quick, gentle fade-in
+  const q = clamp01(lt/OL);
+  const grow = 0.64 + 0.44*Math.pow(q,0.85);     // slow, continuous grow across the whole clip
+  // draw the logo, capturing its on-screen size so sparkles can ring it
+  let boxW = 0, boxH = 0;
+  ctx.save();
+  ctx.globalAlpha = fade;
+  ctx.translate(W/2, H/2); ctx.scale(grow, grow);
   if(logoImg){
     const iw = logoImg.naturalWidth||1, ih = logoImg.naturalHeight||1;
-    const maxW = W*0.42, maxH = H*0.22;
-    const sc = Math.min(maxW/iw, maxH/ih);
-    ctx.drawImage(logoImg, -iw*sc/2, -ih*sc/2, iw*sc, ih*sc);
+    const sc = Math.min((W*0.42)/iw, (H*0.22)/ih);
+    boxW = iw*sc; boxH = ih*sc;
+    ctx.drawImage(logoImg, -boxW/2, -boxH/2, boxW, boxH);
   }
   ctx.restore();
+  // sparkles twinkling around the growing logo
+  const accent = cAccent.value, gold = "#F4C430";
+  const halfW = (boxW*grow)/2, halfH = (boxH*grow)/2;
+  const pts = [[-0.95,-0.75],[0.9,-0.6],[-0.65,0.85],[0.75,0.8],[0.05,-1.15],[-1.12,0.05],[1.12,0.2],[0.25,1.1],[-0.35,-1.05]];
+  pts.forEach((pp,i)=>{
+    const px = W/2 + pp[0]*(halfW + W*0.06);
+    const py = H/2 + pp[1]*(halfH + H*0.035);
+    const phase = i*1.9;
+    const tw = Math.sin(lt*3.1 + phase);          // per-sparkle twinkle
+    if(tw <= 0) return;
+    const r = W*0.010 + W*0.020*tw;
+    drawSparkle(px, py, r, lt*1.4 + phase, tw*fade*0.95, i%2 ? gold : accent);
+  });
   if(document.getElementById("stripeOn").checked){
     const sh = Math.round(H*0.012), seg = W/currentStripe.length;
     currentStripe.forEach((c,i)=>{ ctx.fillStyle = c; ctx.fillRect(i*seg, H-sh, seg+1, sh); });
@@ -2411,7 +2481,12 @@ async function runAutosave(){
   try{
     await ensureSaveBlobs();                     // compact copies first, so the write fits quota
     await writeRecord(await buildProjectRecord(AUTOSAVE_KEY));
-  }catch(e){ /* quota or transient: keep quiet, the manual Save button surfaces real errors */ }
+  }catch(e){
+    // Don't fail silently — if the browser's storage is full the user was losing work on refresh
+    // with no idea why. Surface that one case so it's actionable; stay quiet on transient errors.
+    const quota = e && (e.name==="QuotaExceededError" || /quota|exceeded/i.test(e.message||""));
+    if(quota){ try{ statusEl.textContent = "⚠ Browser storage is full — couldn't auto-save. Remove a few clips, or use Save to Google Drive to keep this project."; }catch(_){} }
+  }
   finally{ autosaveBusy = false; }
 }
 
@@ -2426,6 +2501,11 @@ async function applyProjectRecord(project){
   lastRunPlanSig = null; runOrder = [];
   media.length = 0;
   filmstripSet.arr.length = 0; shuffleSet.arr.length = 0; bradySet.arr.length = 0;
+  // Restore everything inside a guard. One failed piece — a preset resource that 404s, a music
+  // file that won't decode — must NOT abort the whole restore and leave the app half-alive with
+  // clips you can see but can't edit and autosave silently switched off. Whatever happens, the
+  // finally block still renders the thumbnails/handlers and turns autosave back on.
+  try{
   for(const m of project.media){
     if(m.kind==="text"){ media.push({kind:"text", text:m.text, boxTL:m.boxTL||null, boxBR:m.boxBR||null, bgVideo:m.bgVideo||null}); continue; }
     const url = URL.createObjectURL(m.blob);
@@ -2483,22 +2563,28 @@ async function applyProjectRecord(project){
     logoImg = null; logoPreviewWrap.style.display = "none";
   }
 
-  if(project.presetMusicPath){
-    presetMusicSel.value = project.presetMusicPath;
-    currentPresetMusicPath = project.presetMusicPath;
-    await loadMusicFromFile(await blobFromUrl(project.presetMusicPath));
-    musicStartRange.value = s.musicStart; musicStartLabel.textContent = Math.round(s.musicStart)+"s";
-  } else if(project.musicBlob){
-    presetMusicSel.value = ""; currentPresetMusicPath = null;
-    await loadMusicFromFile(project.musicBlob);
-    musicStartRange.value = s.musicStart; musicStartLabel.textContent = Math.round(s.musicStart)+"s";
-  } else {
-    musicEl = null; musicStatus.textContent = "";
-  }
+  try{
+    if(project.presetMusicPath){
+      presetMusicSel.value = project.presetMusicPath;
+      currentPresetMusicPath = project.presetMusicPath;
+      await loadMusicFromFile(await blobFromUrl(project.presetMusicPath));
+      musicStartRange.value = s.musicStart; musicStartLabel.textContent = Math.round(s.musicStart)+"s";
+    } else if(project.musicBlob){
+      presetMusicSel.value = ""; currentPresetMusicPath = null;
+      await loadMusicFromFile(project.musicBlob);
+      musicStartRange.value = s.musicStart; musicStartLabel.textContent = Math.round(s.musicStart)+"s";
+    } else {
+      musicEl = null; musicStatus.textContent = "";
+    }
+  }catch(e){ musicEl = null; try{ musicStatus.textContent = "Music couldn't be restored — re-pick it if you need it."; }catch(_){} }
 
-  renderThumbs(); filmstripSet.render(); shuffleSet.render(); bradySet.render();
-  repaintIdle();
-  autosaveReady = true;
+  }catch(e){ /* keep whatever restored so far; the finally still makes the app usable */ }
+  finally{
+    renderThumbs(); filmstripSet.render(); shuffleSet.render(); bradySet.render();
+    try{ buildRunPlan(true); }catch(e){}   // keep runOrder/boundaries in step with restored media
+    repaintIdle();
+    autosaveReady = true;
+  }
 }
 
 const projectSel = document.getElementById("projectSel");
