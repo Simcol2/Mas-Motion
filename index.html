@@ -499,7 +499,7 @@
 <script>
 /* App version stamp — bumped on every deploy so anyone can see at a glance which build a
    device is actually running (stale caches were making "is the fix live?" unanswerable). */
-const APP_VERSION = "2026-07-23.2";
+const APP_VERSION = "2026-07-23.3";
 document.getElementById("verTag").textContent = "Mas Motion build " + APP_VERSION;
 /* ---------------- storage (safe: falls back to memory if blocked) -------- */
 const memStore = {};
@@ -640,10 +640,11 @@ function addFiles(list){
         if(done) return; done = true;
         const dur = (el.duration && isFinite(el.duration)) ? el.duration : 3;
         const fp = f.name + "|" + f.size + "|" + (f.lastModified||0);
-        const m = {kind:"vid", el, url, dur, trim:{start:0, len:Math.min(3, dur)}, speed:1, id:newId(), blob:f, fp};
+        const m = {kind:"vid", el, url, dur, trim:{start:0, len:Math.min(3, dur)}, speed:1, id:newId(), blob:f, fp, name:f.name};
         media.push(m);
         renderThumbs(); repaintIdle(); scheduleAutosave(); queuePoster(m);
-        bankStash(m, f);   // remember this upload in the clip bank (deduped, best-effort)
+        // NOTE: do NOT bank the original here — the bank only stores the compact copy, added by
+        // ensureSaveBlobs once it's made. Banking originals is what overran storage before.
       };
       el.onerror = ()=>{
         if(done) return; done = true;
@@ -731,46 +732,62 @@ function capturePoster(m){
    dropped back into any reel with one tap — no re-uploading the same file over and over.
    All best-effort: a full disk or blocked IndexedDB never breaks uploading itself. */
 let bankList = [];   // light metadata currently shown in the bank strip
-async function bankStash(m, f){
-  try{
-    const db = await openProjectsDB();
-    const exists = await new Promise(res=>{
-      const r = db.transaction("clips","readonly").objectStore("clips").get(m.fp);
-      r.onsuccess=()=>res(!!r.result); r.onerror=()=>res(false);
-    });
-    if(!exists){
-      await new Promise((res,rej)=>{
-        const tx = db.transaction(["clips","clipBlobs"],"readwrite");
-        tx.objectStore("clips").put({fp:m.fp, name:f.name, dur:m.dur, poster:m.poster||null, addedAt:Date.now()});
-        tx.objectStore("clipBlobs").put({fp:m.fp, blob:f});
-        tx.oncomplete=res; tx.onerror=()=>rej(tx.error);
-      });
-    }
-    refreshBank();
-  }catch(e){ /* bank is a convenience — never let it break an upload */ }
-}
-/* Put clips that are ALREADY loaded (restored from a save, or uploaded before the bank existed)
-   into the bank, so the strip isn't empty just because they predate this feature. Uses the
-   compact stored copy as the blob and synthesises a fingerprint when the clip doesn't have one. */
-async function bankStashFromMedia(m){
-  if(!m || m.kind!=="vid" || !m.blob) return;
-  const fp = m.fp || ("mem|" + (m.blob.size||0) + "|" + (m.dur||m.trim&&m.trim.len||0));
-  m.fp = fp;
+const BANK_MAX = 40; // keep the bank bounded so it can never fill up storage
+
+/* Store ONLY the small compact copy of a clip — never the full original. Storing originals is
+   what overran the phone's storage and got the whole site (saves included) evicted. Deduped by
+   fingerprint, size-capped, and if the device is genuinely out of room we drop the bank's own
+   oldest clips instead of letting a write fail and risk eviction. */
+async function bankPut(fp, meta, blob){
+  if(!fp || !blob) return;
   try{
     const db = await openProjectsDB();
     const exists = await new Promise(res=>{ const r=db.transaction("clips","readonly").objectStore("clips").get(fp); r.onsuccess=()=>res(!!r.result); r.onerror=()=>res(false); });
     if(!exists){
-      await new Promise((res,rej)=>{
+      const doWrite = ()=> new Promise((res,rej)=>{
         const tx = db.transaction(["clips","clipBlobs"],"readwrite");
-        tx.objectStore("clips").put({fp, name:(m.name||"clip"), dur:(m.dur||(m.trim&&m.trim.len)||0), poster:m.poster||null, addedAt:Date.now()});
-        tx.objectStore("clipBlobs").put({fp, blob:m.blob});
-        tx.oncomplete=res; tx.onerror=()=>rej(tx.error);
+        tx.objectStore("clips").put({fp, name:meta.name||"clip", dur:meta.dur||0, poster:meta.poster||null, addedAt:Date.now()});
+        tx.objectStore("clipBlobs").put({fp, blob});
+        tx.oncomplete=res; tx.onerror=()=>rej(tx.error||new Error("bank write failed"));
       });
+      try{ await doWrite(); }
+      catch(e){ if(await bankDropOldest(3)){ try{ await doWrite(); }catch(_){} } }   // make room, retry once
     }
+    await bankEnforceCap();
+    refreshBank();
+  }catch(e){ /* bank is a convenience — it must never jeopardise the actual project save */ }
+}
+async function bankDropOldest(n){
+  try{
+    const db = await openProjectsDB();
+    const all = await new Promise(res=>{ const r=db.transaction("clips","readonly").objectStore("clips").getAll(); r.onsuccess=()=>res(r.result||[]); r.onerror=()=>res([]); });
+    all.sort((a,b)=>(a.addedAt||0)-(b.addedAt||0));
+    const drop = all.slice(0, Math.max(1,n)).map(r=>r.fp);
+    if(!drop.length) return false;
+    await new Promise((res,rej)=>{ const tx=db.transaction(["clips","clipBlobs"],"readwrite"); drop.forEach(fp=>{ tx.objectStore("clips").delete(fp); tx.objectStore("clipBlobs").delete(fp); }); tx.oncomplete=res; tx.onerror=()=>rej(tx.error); });
+    return true;
+  }catch(e){ return false; }
+}
+async function bankEnforceCap(){
+  try{
+    const db = await openProjectsDB();
+    const all = await new Promise(res=>{ const r=db.transaction("clips","readonly").objectStore("clips").getAll(); r.onsuccess=()=>res(r.result||[]); r.onerror=()=>res([]); });
+    if(all.length<=BANK_MAX) return;
+    all.sort((a,b)=>(a.addedAt||0)-(b.addedAt||0));
+    const drop = all.slice(0, all.length-BANK_MAX).map(r=>r.fp);
+    await new Promise((res,rej)=>{ const tx=db.transaction(["clips","clipBlobs"],"readwrite"); drop.forEach(fp=>{ tx.objectStore("clips").delete(fp); tx.objectStore("clipBlobs").delete(fp); }); tx.oncomplete=res; tx.onerror=()=>rej(tx.error); });
   }catch(e){}
 }
+/* Bank a clip using its COMPACT copy only (m.saveBlob). If the compact copy isn't made yet,
+   skip — ensureSaveBlobs banks it once it exists. Never stores a full original. */
+async function bankNote(m){
+  if(!m || m.kind!=="vid" || !m.saveBlob) return;
+  const fp = m.fp || ("mem|" + (m.saveBlob.size||0) + "|" + (m.dur||(m.trim&&m.trim.len)||0));
+  m.fp = fp;
+  await bankPut(fp, {name:m.name||"clip", dur:m.dur||(m.trim&&m.trim.len)||0, poster:m.poster||null}, m.saveBlob);
+}
 async function bankBackfill(){
-  try{ for(const m of media){ if(m.kind==="vid") await bankStashFromMedia(m); } }catch(e){}
+  try{ for(const m of media){ if(m.kind==="vid") await bankNote(m); } }catch(e){}
   refreshBank();
 }
 async function bankSetPoster(fp, poster){
@@ -2521,7 +2538,7 @@ async function ensureSaveBlobs(){
       if(playing || recording) break;
       if(m.saveBlob && m.saveBlobSig===trimSig(m)) continue;
       const blob = await recordTrimmed(m);
-      if(blob){ m.saveBlob = blob; m.saveBlobSig = trimSig(m); }
+      if(blob){ m.saveBlob = blob; m.saveBlobSig = trimSig(m); await bankNote(m); }  // bank the compact copy
     }
   } finally { saveBlobBusy = false; }
 }
