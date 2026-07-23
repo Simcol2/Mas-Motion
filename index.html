@@ -499,7 +499,7 @@
 <script>
 /* App version stamp — bumped on every deploy so anyone can see at a glance which build a
    device is actually running (stale caches were making "is the fix live?" unanswerable). */
-const APP_VERSION = "2026-07-23.1";
+const APP_VERSION = "2026-07-23.2";
 document.getElementById("verTag").textContent = "Mas Motion build " + APP_VERSION;
 /* ---------------- storage (safe: falls back to memory if blocked) -------- */
 const memStore = {};
@@ -748,6 +748,30 @@ async function bankStash(m, f){
     }
     refreshBank();
   }catch(e){ /* bank is a convenience — never let it break an upload */ }
+}
+/* Put clips that are ALREADY loaded (restored from a save, or uploaded before the bank existed)
+   into the bank, so the strip isn't empty just because they predate this feature. Uses the
+   compact stored copy as the blob and synthesises a fingerprint when the clip doesn't have one. */
+async function bankStashFromMedia(m){
+  if(!m || m.kind!=="vid" || !m.blob) return;
+  const fp = m.fp || ("mem|" + (m.blob.size||0) + "|" + (m.dur||m.trim&&m.trim.len||0));
+  m.fp = fp;
+  try{
+    const db = await openProjectsDB();
+    const exists = await new Promise(res=>{ const r=db.transaction("clips","readonly").objectStore("clips").get(fp); r.onsuccess=()=>res(!!r.result); r.onerror=()=>res(false); });
+    if(!exists){
+      await new Promise((res,rej)=>{
+        const tx = db.transaction(["clips","clipBlobs"],"readwrite");
+        tx.objectStore("clips").put({fp, name:(m.name||"clip"), dur:(m.dur||(m.trim&&m.trim.len)||0), poster:m.poster||null, addedAt:Date.now()});
+        tx.objectStore("clipBlobs").put({fp, blob:m.blob});
+        tx.oncomplete=res; tx.onerror=()=>rej(tx.error);
+      });
+    }
+  }catch(e){}
+}
+async function bankBackfill(){
+  try{ for(const m of media){ if(m.kind==="vid") await bankStashFromMedia(m); } }catch(e){}
+  refreshBank();
 }
 async function bankSetPoster(fp, poster){
   try{
@@ -2730,6 +2754,7 @@ async function applyProjectRecord(project){
     try{ buildRunPlan(true); }catch(e){}   // keep runOrder/boundaries in step with restored media
     repaintIdle();
     autosaveReady = true;
+    bankBackfill();   // make sure clips already in this project show up in the bank too
   }
 }
 
