@@ -746,14 +746,19 @@ const trimSpeed = document.getElementById("trimSpeed"), trimSpeedLabel = documen
 const trimReadout = document.getElementById("trimReadout");
 
 function openTrim(i){
-  trimIndex = i;
   const m = media[i];
+  if(!m || m.kind!=="vid") return;
+  if(!m.trim) m.trim = {start:0, len:Math.min(3, m.dur||3)};
+  // a restored clip whose metadata never loaded can be missing .dur — fall back so the editor
+  // still opens (clicking a clip must never just do nothing)
+  const dur = (typeof m.dur==="number" && m.dur>0) ? m.dur : (m.trim.start + m.trim.len) || 3;
+  trimIndex = i;
   trimLen.value = String(Math.round(m.trim.len));
-  trimStart.max = Math.max(0, m.dur - m.trim.len).toFixed(1);
+  trimStart.max = Math.max(0, dur - m.trim.len).toFixed(1);
   trimStart.value = m.trim.start.toFixed(1);
   trimSpeed.value = m.speed || 1;
   trimSpeedLabel.textContent = (m.speed || 1) + "×";
-  document.getElementById("trimTitle").textContent = `Trim clip ${i+1} (${m.dur.toFixed(1)}s total)`;
+  document.getElementById("trimTitle").textContent = `Trim clip ${i+1} (${dur.toFixed(1)}s total)`;
   trimPanel.classList.add("open");
   updateTrimReadout(); renderThumbs();
 }
@@ -2476,7 +2481,12 @@ async function runAutosave(){
   try{
     await ensureSaveBlobs();                     // compact copies first, so the write fits quota
     await writeRecord(await buildProjectRecord(AUTOSAVE_KEY));
-  }catch(e){ /* quota or transient: keep quiet, the manual Save button surfaces real errors */ }
+  }catch(e){
+    // Don't fail silently — if the browser's storage is full the user was losing work on refresh
+    // with no idea why. Surface that one case so it's actionable; stay quiet on transient errors.
+    const quota = e && (e.name==="QuotaExceededError" || /quota|exceeded/i.test(e.message||""));
+    if(quota){ try{ statusEl.textContent = "⚠ Browser storage is full — couldn't auto-save. Remove a few clips, or use Save to Google Drive to keep this project."; }catch(_){} }
+  }
   finally{ autosaveBusy = false; }
 }
 
@@ -2491,6 +2501,11 @@ async function applyProjectRecord(project){
   lastRunPlanSig = null; runOrder = [];
   media.length = 0;
   filmstripSet.arr.length = 0; shuffleSet.arr.length = 0; bradySet.arr.length = 0;
+  // Restore everything inside a guard. One failed piece — a preset resource that 404s, a music
+  // file that won't decode — must NOT abort the whole restore and leave the app half-alive with
+  // clips you can see but can't edit and autosave silently switched off. Whatever happens, the
+  // finally block still renders the thumbnails/handlers and turns autosave back on.
+  try{
   for(const m of project.media){
     if(m.kind==="text"){ media.push({kind:"text", text:m.text, boxTL:m.boxTL||null, boxBR:m.boxBR||null, bgVideo:m.bgVideo||null}); continue; }
     const url = URL.createObjectURL(m.blob);
@@ -2548,22 +2563,28 @@ async function applyProjectRecord(project){
     logoImg = null; logoPreviewWrap.style.display = "none";
   }
 
-  if(project.presetMusicPath){
-    presetMusicSel.value = project.presetMusicPath;
-    currentPresetMusicPath = project.presetMusicPath;
-    await loadMusicFromFile(await blobFromUrl(project.presetMusicPath));
-    musicStartRange.value = s.musicStart; musicStartLabel.textContent = Math.round(s.musicStart)+"s";
-  } else if(project.musicBlob){
-    presetMusicSel.value = ""; currentPresetMusicPath = null;
-    await loadMusicFromFile(project.musicBlob);
-    musicStartRange.value = s.musicStart; musicStartLabel.textContent = Math.round(s.musicStart)+"s";
-  } else {
-    musicEl = null; musicStatus.textContent = "";
-  }
+  try{
+    if(project.presetMusicPath){
+      presetMusicSel.value = project.presetMusicPath;
+      currentPresetMusicPath = project.presetMusicPath;
+      await loadMusicFromFile(await blobFromUrl(project.presetMusicPath));
+      musicStartRange.value = s.musicStart; musicStartLabel.textContent = Math.round(s.musicStart)+"s";
+    } else if(project.musicBlob){
+      presetMusicSel.value = ""; currentPresetMusicPath = null;
+      await loadMusicFromFile(project.musicBlob);
+      musicStartRange.value = s.musicStart; musicStartLabel.textContent = Math.round(s.musicStart)+"s";
+    } else {
+      musicEl = null; musicStatus.textContent = "";
+    }
+  }catch(e){ musicEl = null; try{ musicStatus.textContent = "Music couldn't be restored — re-pick it if you need it."; }catch(_){} }
 
-  renderThumbs(); filmstripSet.render(); shuffleSet.render(); bradySet.render();
-  repaintIdle();
-  autosaveReady = true;
+  }catch(e){ /* keep whatever restored so far; the finally still makes the app usable */ }
+  finally{
+    renderThumbs(); filmstripSet.render(); shuffleSet.render(); bradySet.render();
+    try{ buildRunPlan(true); }catch(e){}   // keep runOrder/boundaries in step with restored media
+    repaintIdle();
+    autosaveReady = true;
+  }
 }
 
 const projectSel = document.getElementById("projectSel");
