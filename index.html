@@ -205,8 +205,12 @@
     </div>
     <div id="gdConnected" style="display:none;">
       <p class="music-status" id="gdStatus" style="color:var(--blue);"></p>
+      <label style="display:flex; align-items:center; gap:8px; margin:4px 0 2px; font-size:.9rem; font-weight:600;">
+        <input type="checkbox" id="gdAutoToggle" style="width:auto; margin:0;"> ☁ Auto-back-up to Drive as I work
+      </label>
+      <p class="hint" id="gdAutoStatus" style="margin:0 0 8px; min-height:1em;"></p>
       <div class="btnrow" style="margin-top:6px;">
-        <button class="smallbtn gold" id="gdSave">⬆ Save to Drive</button>
+        <button class="smallbtn gold" id="gdSave">⬆ Save a named copy</button>
         <button class="smallbtn" id="gdDisconnect" style="flex:none; padding:8px 12px;">Sign out</button>
       </div>
       <label for="gdProjectSel" style="margin-top:10px;">Your Drive projects</label>
@@ -499,7 +503,7 @@
 <script>
 /* App version stamp — bumped on every deploy so anyone can see at a glance which build a
    device is actually running (stale caches were making "is the fix live?" unanswerable). */
-const APP_VERSION = "2026-07-23.3";
+const APP_VERSION = "2026-07-23.4";
 document.getElementById("verTag").textContent = "Mas Motion build " + APP_VERSION;
 /* ---------------- storage (safe: falls back to memory if blocked) -------- */
 const memStore = {};
@@ -2672,9 +2676,10 @@ async function runAutosave(){
     // Don't fail silently — if the browser's storage is full the user was losing work on refresh
     // with no idea why. Surface that one case so it's actionable; stay quiet on transient errors.
     const quota = e && (e.name==="QuotaExceededError" || /quota|exceeded/i.test(e.message||""));
-    if(quota){ try{ statusEl.textContent = "⚠ Browser storage is full — couldn't auto-save. Remove a few clips, or use Save to Google Drive to keep this project."; }catch(_){} }
+    if(quota){ try{ statusEl.textContent = "⚠ Browser storage is full — but if Drive auto-backup is on, your work is still safe in the cloud."; }catch(_){} }
   }
   finally{ autosaveBusy = false; }
+  scheduleDriveBackup();   // mirror to Google Drive too, so a local wipe can't lose the work
 }
 
 async function loadProject(name){
@@ -2907,12 +2912,13 @@ gdEl("gdConnect").addEventListener("click", async ()=>{
     await gdEnsureToken();
     gdShowConnected(true);
     gdEl("gdStatus").textContent = "Connected. Your projects are listed below.";
+    setDriveAuto(true);          // once connected, keep it backed up automatically by default
     await gdRefreshList();
   }catch(e){ statusEl.textContent = e.message || "Couldn't connect to Google Drive."; }
 });
 gdEl("gdDisconnect").addEventListener("click", ()=>{
   try{ if(gd.token && window.google) google.accounts.oauth2.revoke(gd.token, ()=>{}); }catch(e){}
-  gd.token=null; gdShowConnected(false);
+  gd.token=null; setDriveAuto(false); gdShowConnected(false);
 });
 gdEl("gdSave").addEventListener("click", async ()=>{
   const name = prompt("Name this Drive project (e.g. Fancy Sailors 2026):"); if(!name) return;
@@ -2944,6 +2950,98 @@ async function gdFindByName(fileName){
   const j = await r.json();
   return (j.files && j.files[0]) ? j.files[0].id : null;
 }
+
+/* ---------------- automatic Google Drive backup ----------------
+   The real fix for losing work: as you edit, the project is mirrored to ONE file in your Drive
+   ("Auto-backup"), so even if this phone's browser wipes its local storage, your work is safe in
+   the cloud and comes back on the next open. Local auto-save still runs too (it's instant); Drive
+   is the durable copy on top. All best-effort — a network blip or expired sign-in never blocks
+   editing, it just pauses the backup and says so. */
+const DRIVE_AUTO_NAME = "MasMotion — Auto-backup.masmotion";
+let driveAutoOn = store.get("gdAuto") === true;
+let driveBackupTimer = null, driveBackupBusy = false, driveAutoFileId = null;
+function setGdAutoStatus(msg, warn){ const el=gdEl("gdAutoStatus"); if(el){ el.textContent = msg; el.style.color = warn ? "#B23B3B" : "var(--blue)"; } }
+/* Get a token WITHOUT forcing the consent popup — used to silently resume backup on a fresh
+   load or after the token expires, so the user isn't nagged to click every time. */
+function gdSilentToken(){
+  return new Promise((resolve)=>{
+    const clientId = (gdEl("gdClientId").value||"").trim();
+    if(!clientId){ resolve(null); return; }
+    loadGis().then(()=>{
+      try{
+        gd.tokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: clientId,
+          scope: "https://www.googleapis.com/auth/drive.file",
+          callback: (resp)=> resolve(resp && resp.access_token ? resp.access_token : null),
+          error_callback: ()=> resolve(null)
+        });
+        gd.tokenClient.requestAccessToken({prompt:""});
+      }catch(e){ resolve(null); }
+    }).catch(()=>resolve(null));
+  });
+}
+async function driveEnsureTokenSilent(){ if(gd.token) return gd.token; const t = await gdSilentToken(); if(t) gd.token = t; return gd.token; }
+async function driveUploadBundle(bundle){
+  if(!driveAutoFileId){ try{ driveAutoFileId = await gdFindByName(DRIVE_AUTO_NAME); }catch(e){} }
+  if(driveAutoFileId){
+    await gdApi(`https://www.googleapis.com/upload/drive/v3/files/${driveAutoFileId}?uploadType=media`, {method:"PATCH", body:bundle});
+  } else {
+    const form = new FormData();
+    form.append("metadata", new Blob([JSON.stringify({name:DRIVE_AUTO_NAME, mimeType:"application/octet-stream"})], {type:"application/json"}));
+    form.append("file", bundle);
+    const r = await gdApi("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id", {method:"POST", body:form});
+    const j = await r.json(); driveAutoFileId = j.id || null;
+  }
+}
+async function driveBackupNow(){
+  if(!driveAutoOn || driveBackupBusy) return;
+  const anything = media.length || filmstripSet.arr.length || shuffleSet.arr.length || bradySet.arr.length;
+  if(!anything) return;
+  driveBackupBusy = true;
+  try{
+    setGdAutoStatus("Backing up to Drive…");
+    await driveEnsureTokenSilent();
+    if(!gd.token){ setGdAutoStatus("Backup paused — tap Connect Google Drive to resume.", true); return; }
+    await ensureSaveBlobs();
+    const bundle = await packProject(await buildProjectRecord(DRIVE_AUTO_NAME));
+    await driveUploadBundle(bundle);
+    setGdAutoStatus("Backed up to Google Drive ✓ " + new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}));
+  }catch(e){
+    gd.token = null;   // force a fresh silent token next time
+    setGdAutoStatus("Backup paused (" + (e.message||"network") + ") — it'll retry.", true);
+  }finally{ driveBackupBusy = false; }
+}
+function scheduleDriveBackup(){
+  if(!driveAutoOn) return;
+  clearTimeout(driveBackupTimer);
+  driveBackupTimer = setTimeout(driveBackupNow, 9000);   // let a burst of edits settle first
+}
+async function driveRestoreIfLocalEmpty(){
+  // Called on load when local storage had nothing (evicted or first time on a new device):
+  // pull the Drive auto-backup so work survives even a full local wipe.
+  if(!driveAutoOn) return false;
+  try{
+    await driveEnsureTokenSilent();
+    if(!gd.token) return false;
+    const id = await gdFindByName(DRIVE_AUTO_NAME);
+    if(!id) return false;
+    const r = await gdApi(`https://www.googleapis.com/drive/v3/files/${id}?alt=media`);
+    const record = await unpackProject(await r.blob());
+    await applyProjectRecord(record);
+    driveAutoFileId = id;
+    statusEl.innerHTML = "Restored your work from Google Drive.";
+    setGdAutoStatus("Restored from Drive ✓");
+    gdShowConnected(true); const tg=gdEl("gdAutoToggle"); if(tg) tg.checked = true;
+    return true;
+  }catch(e){ return false; }
+}
+function setDriveAuto(on){
+  driveAutoOn = on; store.set("gdAuto", on);
+  const tg = gdEl("gdAutoToggle"); if(tg) tg.checked = on;
+  if(on){ setGdAutoStatus("On — your work backs up to Drive automatically."); driveBackupNow(); }
+  else setGdAutoStatus("Off — using this device's storage only.");
+}
+gdEl("gdAutoToggle").addEventListener("change", ()=> setDriveAuto(gdEl("gdAutoToggle").checked));
 async function gdRefreshList(){
   const sel = gdEl("gdProjectSel");
   try{
@@ -3015,16 +3113,20 @@ refreshBank();   // show previously uploaded clips (the bank) as soon as the app
     if(has){
       await applyProjectRecord(rec);
       statusEl.innerHTML = "Picked up right where you left off — your photos, clips and settings are back.";
+      if(driveAutoOn) driveEnsureTokenSilent().then(()=>{ if(gd.token){ gdShowConnected(true); const tg=gdEl("gdAutoToggle"); if(tg) tg.checked=true; setGdAutoStatus("Auto-backup on."); } });
     } else {
+      // Local had nothing (first run, new device, or the browser wiped it) — try the cloud.
       autosaveReady = true;
+      const pulled = await driveRestoreIfLocalEmpty();
+      if(!pulled) autosaveReady = true;
     }
   }catch(e){ autosaveReady = true; }
 })();
 
 /* Best-effort catch-all: also stash the current state when you leave/switch away, so
    even changes that don't individually trigger a save aren't lost. */
-window.addEventListener("pagehide", ()=>{ try{ runAutosave(); }catch(e){} });
-document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="hidden"){ try{ runAutosave(); }catch(e){} } });
+window.addEventListener("pagehide", ()=>{ try{ runAutosave(); }catch(e){} try{ driveBackupNow(); }catch(e){} });
+document.addEventListener("visibilitychange", ()=>{ if(document.visibilityState==="hidden"){ try{ runAutosave(); }catch(e){} try{ driveBackupNow(); }catch(e){} } });
 </script>
 </body>
 </html>
