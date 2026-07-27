@@ -503,7 +503,7 @@
 <script>
 /* App version stamp — bumped on every deploy so anyone can see at a glance which build a
    device is actually running (stale caches were making "is the fix live?" unanswerable). */
-const APP_VERSION = "2026-07-23.10";
+const APP_VERSION = "2026-07-23.11";
 document.getElementById("verTag").textContent = "Mas Motion build " + APP_VERSION;
 /* ---------------- storage (safe: falls back to memory if blocked) -------- */
 const memStore = {};
@@ -735,6 +735,21 @@ function capturePoster(m){
    Once a clip has been uploaded it lives in the bank (deduped by name+size+date) and can be
    dropped back into any reel with one tap — no re-uploading the same file over and over.
    All best-effort: a full disk or blocked IndexedDB never breaks uploading itself. */
+/* Release a media item's blob: URLs and free its offscreen canvas when it's removed or replaced.
+   Without this, every uploaded clip/photo leaked its object URL (hundreds of MB over a session),
+   which slowly bogged the tab down and could crash it. */
+function cleanupMedia(m){
+  if(!m) return;
+  try{ if(m.url && String(m.url).startsWith("blob:")) URL.revokeObjectURL(m.url); }catch(e){}
+  try{ if(m.el && m.el.src && String(m.el.src).startsWith("blob:") && m.el.src!==m.url) URL.revokeObjectURL(m.el.src); }catch(e){}
+  try{ if(m.el && m.el.tagName==="VIDEO"){ m.el.pause(); m.el.removeAttribute("src"); m.el.load(); } }catch(e){}
+  try{ if(m.draw){ m.draw.width = 0; m.draw.height = 0; } }catch(e){}
+}
+function cleanupAllMedia(){
+  try{ media.forEach(cleanupMedia); }catch(e){}
+  [filmstripSet, shuffleSet, bradySet].forEach(s=>{ try{ s.arr.forEach(cleanupMedia); }catch(e){} });
+}
+
 let bankList = [];   // light metadata currently shown in the bank strip
 const BANK_MAX = 40; // keep the bank bounded so it can never fill up storage
 
@@ -886,7 +901,7 @@ function renderThumbs(){
   });
   wrap.querySelectorAll("button").forEach(b=>b.addEventListener("click", ()=>{
     const i = +b.dataset.i, a = b.dataset.a;
-    if(a==="del"){ media.splice(i,1); if(trimIndex===i) closeTrim(); if(textEditIndex===i) closeTextEdit(); }
+    if(a==="del"){ cleanupMedia(media[i]); media.splice(i,1); if(trimIndex===i) closeTrim(); if(textEditIndex===i) closeTextEdit(); }
     if(a==="up" && i>0) [media[i-1],media[i]]=[media[i],media[i-1]];
     if(a==="dn" && i<media.length-1) [media[i+1],media[i]]=[media[i],media[i+1]];
     if(a==="cut"){ openTrim(i); return; }
@@ -2745,6 +2760,7 @@ async function applyProjectRecord(project){
   autosaveReady = false;         // don't let autosave fire on our own restore writes
   closeTrim();
   lastRunPlanSig = null; runOrder = [];
+  cleanupAllMedia();   // free the old project's blob URLs before replacing it (no leak on load)
   media.length = 0;
   filmstripSet.arr.length = 0; shuffleSet.arr.length = 0; bradySet.arr.length = 0;
   // Restore everything inside a guard. One failed piece — a preset resource that 404s, a music
