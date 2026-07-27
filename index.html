@@ -503,7 +503,7 @@
 <script>
 /* App version stamp — bumped on every deploy so anyone can see at a glance which build a
    device is actually running (stale caches were making "is the fix live?" unanswerable). */
-const APP_VERSION = "2026-07-23.6";
+const APP_VERSION = "2026-07-23.7";
 document.getElementById("verTag").textContent = "Mas Motion build " + APP_VERSION;
 /* ---------------- storage (safe: falls back to memory if blocked) -------- */
 const memStore = {};
@@ -2521,8 +2521,32 @@ async function blobFromUrl(url){ return (await fetch(url)).blob(); }
    clips, fetch(blob:url) under memory pressure was throwing "Failed to fetch" and killing
    the whole save — reading the retained blob avoids that path entirely. */
 async function blobOf(m){ try{ return m.blob || await blobFromUrl(m.url); }catch(e){ return new Blob([]); } }
+/* Re-encode a decoded image element to a fresh, always-readable blob. Saving the ORIGINAL phone
+   file is what let these go empty (the file reference goes stale on mobile); the decoded image in
+   memory can't. */
+function imgElToBlob(el, type, q){
+  return new Promise(res=>{
+    try{
+      const w = el && (el.naturalWidth||el.width), h = el && (el.naturalHeight||el.height);
+      if(!w || !h){ res(null); return; }
+      const c = document.createElement("canvas"); c.width=w; c.height=h;
+      c.getContext("2d").drawImage(el,0,0);
+      c.toBlob(b=> res(b && b.size ? b : null), type||"image/jpeg", q||0.86);
+    }catch(e){ res(null); }
+  });
+}
 async function blobsFromSet(set){
-  return Promise.all(set.arr.map(async m=>({blob: await blobOf(m)})));
+  return Promise.all(set.arr.map(async m=>{
+    let b = await imgElToBlob(m.el);            // durable copy from the decoded image
+    if(!b){ try{ b = await blobOf(m); }catch(e){ b = null; } }   // fall back to the stored file
+    return { blob: b || new Blob([]) };
+  }));
+}
+async function durableLogoBlob(){
+  if(!logoImg) return null;
+  const b = await imgElToBlob(logoImg, "image/png");
+  if(b) return b;
+  try{ return await blobFromUrl(logoPreview.src); }catch(e){ return null; }
 }
 
 /* Saving stored each clip's FULL original file. A few big phone clips blow past the browser's
@@ -2601,9 +2625,16 @@ function recordTrimmed(m){
 }
 async function loadImageBlobInto(set, blob){
   return new Promise(resolve=>{
+    // Never hang the whole restore on one bad photo. A missing/empty/undecodable blob is skipped
+    // (onerror + timeout both resolve) instead of stalling — that stall is why the fast-animation
+    // photos, the logo and the year (all restored AFTER these) kept vanishing.
+    let done=false; const finish=()=>{ if(!done){ done=true; resolve(); } };
+    if(!blob || !blob.size){ finish(); return; }
     const url = URL.createObjectURL(blob);
     const img = new Image();
-    img.onload = ()=>{ set.arr.push({el:img, url, blob, draw:makeDrawCopy(img)}); resolve(); };
+    img.onload = ()=>{ if(done) return; done=true; set.arr.push({el:img, url, blob, draw:makeDrawCopy(img)}); resolve(); };
+    img.onerror = finish;
+    setTimeout(finish, 6000);
     img.src = url;
   });
 }
@@ -2637,7 +2668,7 @@ async function buildProjectRecord(name){
       filmstripSegOn:filmstripSegOn.checked, shuffleSegOn:shuffleSegOn.checked, bradySegOn:bradySegOn.checked,
       musicStart:musicStartSec()
     },
-    logoBlob: logoImg ? await blobFromUrl(logoPreview.src) : null,
+    logoBlob: await durableLogoBlob(),
     musicBlob: (musicEl && !currentPresetMusicPath) ? await blobFromUrl(musicEl.src) : null,
     presetMusicPath: currentPresetMusicPath
   };
