@@ -503,7 +503,7 @@
 <script>
 /* App version stamp — bumped on every deploy so anyone can see at a glance which build a
    device is actually running (stale caches were making "is the fix live?" unanswerable). */
-const APP_VERSION = "2026-07-23.11";
+const APP_VERSION = "2026-07-23.12";
 document.getElementById("verTag").textContent = "Mas Motion build " + APP_VERSION;
 /* ---------------- storage (safe: falls back to memory if blocked) -------- */
 const memStore = {};
@@ -2488,6 +2488,9 @@ exportBtn.addEventListener("click", async ()=>{
   closeTrim(); buildRunPlan();
   dlLink.style.display = "none";
   recording = true; exportBtn.disabled = true; previewBtn.disabled = true;
+  // Nothing may compete with the real-time capture: cancel any pending auto-save / Drive backup
+  // so they can't fire mid-render and stutter the exported video.
+  clearTimeout(autosaveTimer); clearTimeout(driveBackupTimer);
   statusEl.textContent = "Getting clips ready…";
   await primeVideos();
 
@@ -2526,6 +2529,7 @@ exportBtn.addEventListener("click", async ()=>{
       (ext==="webm" ? " If a platform rejects WEBM, share it to CapCut or your gallery and it converts to MP4 on import." : "");
     recording = false; exportBtn.disabled = false; previewBtn.disabled = false;
     stopAllVideos();
+    scheduleAutosave(800);   // resume normal saving now that the render is done
   };
 
   statusEl.textContent = "Rendering in real time… keep this tab open.";
@@ -2728,12 +2732,12 @@ async function saveProject(name){ await ensureSaveBlobs(); await writeRecord(awa
 const AUTOSAVE_KEY = "__autosave__";
 let autosaveTimer = null, autosaveBusy = false, autosaveReady = false;
 function scheduleAutosave(delay=2500){
-  if(!autosaveReady) return; // don't fire while a project is still being restored/loaded
+  if(!autosaveReady || recording || playing) return; // never while restoring, previewing, or exporting
   clearTimeout(autosaveTimer);
   autosaveTimer = setTimeout(runAutosave, delay);
 }
 async function runAutosave(){
-  if(!autosaveReady) return;
+  if(!autosaveReady || recording || playing) return;   // saving mid-render/preview stutters playback
   if(autosaveBusy){ scheduleAutosave(800); return; }
   const anything = media.length || filmstripSet.arr.length || shuffleSet.arr.length || bradySet.arr.length;
   if(!anything) return;
@@ -3067,7 +3071,7 @@ async function driveUploadBundle(bundle){
   }
 }
 async function driveBackupNow(){
-  if(!driveAutoOn || driveBackupBusy) return;
+  if(!driveAutoOn || driveBackupBusy || recording || playing) return;  // heavy (reads+uploads) — never during render/preview
   const anything = media.length || filmstripSet.arr.length || shuffleSet.arr.length || bradySet.arr.length;
   if(!anything) return;
   driveBackupBusy = true;
@@ -3089,7 +3093,7 @@ async function driveBackupNow(){
   }finally{ driveBackupBusy = false; }
 }
 function scheduleDriveBackup(){
-  if(!driveAutoOn) return;
+  if(!driveAutoOn || recording || playing) return;
   clearTimeout(driveBackupTimer);
   driveBackupTimer = setTimeout(driveBackupNow, 9000);   // let a burst of edits settle first
 }
