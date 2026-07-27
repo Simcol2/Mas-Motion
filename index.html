@@ -503,7 +503,7 @@
 <script>
 /* App version stamp — bumped on every deploy so anyone can see at a glance which build a
    device is actually running (stale caches were making "is the fix live?" unanswerable). */
-const APP_VERSION = "2026-07-23.4";
+const APP_VERSION = "2026-07-23.5";
 document.getElementById("verTag").textContent = "Mas Motion build " + APP_VERSION;
 /* ---------------- storage (safe: falls back to memory if blocked) -------- */
 const memStore = {};
@@ -1204,7 +1204,7 @@ function computeBoundaries(){
   const durs = order.map(idx=>{
     const m = media[idx];
     if(m.kind==="text") return Math.max(1.6, even - 0.5);
-    if(m.kind==="vid")  return Math.max(0.6, (m.trim ? m.trim.len : even) / (m.speed || 1));
+    if(m.kind==="vid")  return Math.max(0.6, (m.trim ? m.trim.len : even));  // screen seconds — speed must NOT stretch the slot
     return -1; // photo — filled below
   });
   const imgIdx = []; durs.forEach((d,i)=>{ if(d<0) imgIdx.push(i); });
@@ -1608,7 +1608,10 @@ function syncVideo(m, offset){
   const v = m.el;
   const rate = m.speed || 1;
   if(v.playbackRate !== rate){ try{ v.playbackRate = rate; }catch(e){} }
-  const end = m.trim.start + m.trim.len;
+  // The slide lasts trim.len SCREEN seconds; at playback rate `rate` that consumes trim.len*rate
+  // seconds of source. So the played range ends there — slowing a clip shows LESS of it in the
+  // same slot, it doesn't make the slot longer.
+  const end = m.trim.start + m.trim.len * rate;
   if(offset < 0.08){            // slide just started — (re)start from the trim point
     if(v.currentTime < m.trim.start - 0.05 || v.currentTime >= end - 0.05){ try{ v.currentTime = m.trim.start; }catch(e){} }
     if(v.paused){ try{ v.play(); }catch(e){} }
@@ -2517,7 +2520,7 @@ async function blobFromUrl(url){ return (await fetch(url)).blob(); }
 /* Prefer the original File kept in memory over re-fetching the blob: URL. With many large
    clips, fetch(blob:url) under memory pressure was throwing "Failed to fetch" and killing
    the whole save — reading the retained blob avoids that path entirely. */
-async function blobOf(m){ return m.blob || await blobFromUrl(m.url); }
+async function blobOf(m){ try{ return m.blob || await blobFromUrl(m.url); }catch(e){ return new Blob([]); } }
 async function blobsFromSet(set){
   return Promise.all(set.arr.map(async m=>({blob: await blobOf(m)})));
 }
@@ -2571,7 +2574,9 @@ function recordTrimmed(m){
           const mime = ["video/webm;codecs=vp9","video/webm;codecs=vp8","video/webm"].find(t=>MediaRecorder.isTypeSupported(t))||"";
           rec = new MediaRecorder(stream, mime?{mimeType:mime, videoBitsPerSecond: 6_000_000}:{});
           const chunks=[]; rec.ondataavailable=e=>{ if(e.data.size) chunks.push(e.data); };
-          const end = m.trim.start + m.trim.len;
+          // capture enough source to cover playback at this speed (and re-editing slow clips):
+          // at least trim.len, or trim.len*speed when sped up
+          const end = m.trim.start + m.trim.len * Math.max(1, m.speed || 1);
           rec.onstop = ()=>{ cleanup(); resolve(chunks.length ? new Blob(chunks,{type:mime||"video/webm"}) : null); };
           const draw=()=>{
             if(playing || recording){ finish(); return; }   // bail if a preview/export starts
@@ -2843,7 +2848,10 @@ async function packProject(record){
     return v;
   };
   const refRecord = walk(record);
-  const bufs = await Promise.all(blobs.map(b=>b.arrayBuffer()));
+  // One clip's original file going unreadable (the "requested file could not be read" error on
+  // mobile) must not sink the whole save. Read what we can; a failed one becomes empty so the
+  // rest of the project still saves.
+  const bufs = await Promise.all(blobs.map(async b=>{ try{ return await b.arrayBuffer(); }catch(e){ return new ArrayBuffer(0); } }));
   let off=0; const parts = bufs.map((buf,i)=>{ const p={o:off, l:buf.byteLength, t:blobs[i].type||""}; off+=buf.byteLength; return p; });
   const manifestBytes = new TextEncoder().encode(JSON.stringify({record:refRecord, parts}));
   const head = new Uint8Array(8); new DataView(head.buffer).setUint32(0, manifestBytes.length, true);
