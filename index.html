@@ -503,7 +503,7 @@
 <script>
 /* App version stamp — bumped on every deploy so anyone can see at a glance which build a
    device is actually running (stale caches were making "is the fix live?" unanswerable). */
-const APP_VERSION = "2026-07-23.5";
+const APP_VERSION = "2026-07-23.6";
 document.getElementById("verTag").textContent = "Mas Motion build " + APP_VERSION;
 /* ---------------- storage (safe: falls back to memory if blocked) -------- */
 const memStore = {};
@@ -3014,6 +3014,10 @@ async function driveBackupNow(){
     const bundle = await packProject(await buildProjectRecord(DRIVE_AUTO_NAME));
     await driveUploadBundle(bundle);
     setGdAutoStatus("Backed up to Google Drive ✓ " + new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}));
+    // if the "Your Drive projects" list is still showing its empty default, fill it now that we
+    // definitely have a working connection — so saved projects don't look like they vanished
+    const sel = gdEl("gdProjectSel");
+    if(sel && (!sel.options.length || (sel.options.length===1 && !sel.options[0].value))) gdRefreshList();
   }catch(e){
     gd.token = null;   // force a fresh silent token next time
     setGdAutoStatus("Backup paused (" + (e.message||"network") + ") — it'll retry.", true);
@@ -3040,6 +3044,7 @@ async function driveRestoreIfLocalEmpty(){
     statusEl.innerHTML = "Restored your work from Google Drive.";
     setGdAutoStatus("Restored from Drive ✓");
     gdShowConnected(true); const tg=gdEl("gdAutoToggle"); if(tg) tg.checked = true;
+    gdRefreshList();
     return true;
   }catch(e){ return false; }
 }
@@ -3121,7 +3126,7 @@ refreshBank();   // show previously uploaded clips (the bank) as soon as the app
     if(has){
       await applyProjectRecord(rec);
       statusEl.innerHTML = "Picked up right where you left off — your photos, clips and settings are back.";
-      if(driveAutoOn) driveEnsureTokenSilent().then(()=>{ if(gd.token){ gdShowConnected(true); const tg=gdEl("gdAutoToggle"); if(tg) tg.checked=true; setGdAutoStatus("Auto-backup on."); } });
+      if(driveAutoOn) driveEnsureTokenSilent().then(()=>{ if(gd.token){ gdShowConnected(true); const tg=gdEl("gdAutoToggle"); if(tg) tg.checked=true; setGdAutoStatus("Auto-backup on."); gdRefreshList(); } });
     } else {
       // Local had nothing (first run, new device, or the browser wiped it) — try the cloud.
       autosaveReady = true;
