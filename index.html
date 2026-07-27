@@ -503,7 +503,7 @@
 <script>
 /* App version stamp — bumped on every deploy so anyone can see at a glance which build a
    device is actually running (stale caches were making "is the fix live?" unanswerable). */
-const APP_VERSION = "2026-07-23.8";
+const APP_VERSION = "2026-07-23.9";
 document.getElementById("verTag").textContent = "Mas Motion build " + APP_VERSION;
 /* ---------------- storage (safe: falls back to memory if blocked) -------- */
 const memStore = {};
@@ -1739,7 +1739,15 @@ function renderMainFrame(t, W, H){
   });
 
   const m = media[realIdx];
-  if(m.kind==="vid") syncVideo(m, local);
+  if(m.kind==="vid"){
+    // If the NEXT slide is a text slide whose backdrop is THIS clip, keep it rolling instead of
+    // holding at the trim end — the hold-then-resume was the pause/glitch. Playing straight
+    // through makes the clip flow seamlessly under the text.
+    const nextSlide = media[realNextIdx];
+    let flowsIntoText = false;
+    if(nextSlide && nextSlide.kind==="text"){ const bv = bgVideoForText(nextSlide); flowsIntoText = !!(bv && bv.id===m.id); }
+    if(flowsIntoText) extendBgVideo(m); else syncVideo(m, local);
+  }
   const kb = m.kind==="img" ? 1.06 + 0.14*prog : 1;
   const dir = idx%2===0 ? 1 : -1;
 
