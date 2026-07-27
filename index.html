@@ -503,7 +503,7 @@
 <script>
 /* App version stamp — bumped on every deploy so anyone can see at a glance which build a
    device is actually running (stale caches were making "is the fix live?" unanswerable). */
-const APP_VERSION = "2026-07-23.9";
+const APP_VERSION = "2026-07-23.10";
 document.getElementById("verTag").textContent = "Mas Motion build " + APP_VERSION;
 /* ---------------- storage (safe: falls back to memory if blocked) -------- */
 const memStore = {};
@@ -1898,7 +1898,8 @@ function renderMainFrame(t, W, H){
     const sh = Math.round(H*0.012), seg = W/currentStripe.length;
     currentStripe.forEach((c,i)=>{ ctx.fillStyle = c; ctx.fillRect(i*seg, H-sh, seg+1, sh); });
   }
-  addFilmLook(W,H);
+  // (no film-grain / vignette overlay on the reel — it wasn't asked for and the vignette darkened
+  //  the edges toward black, against the no-black-backgrounds rule)
   drawWatermarkYear(W,H);
   drawSticker(W,H);
 }
@@ -2053,15 +2054,9 @@ function buildGrainFrames(){
   }
 }
 function addFilmLook(W,H){
-  ctx.fillStyle = getVignette(W,H); ctx.fillRect(0,0,W,H);
-
-  if(!grainFrames) buildGrainFrames();
-  grainTick++;
-  if(grainTick % 2 === 0) grainCx.putImageData(grainFrames[Math.floor(grainTick/2) % GRAIN_FRAME_COUNT], 0, 0);
-  ctx.save();
-  ctx.globalAlpha = .5; ctx.globalCompositeOperation = "overlay";
-  ctx.drawImage(grainCv, 0,0,W,H);
-  ctx.restore();
+  // Intentionally does nothing. The film-grain texture and dark vignette were never requested and
+  // the vignette darkened edges toward black (against the no-black-backgrounds rule). Left as a
+  // no-op so the existing call sites (reel, segments, outro, idle) simply draw clean.
 }
 function drawIdleCard(W,H,accent,fam){
   const darkText = isLightColor(cBg.value);
