@@ -503,7 +503,7 @@
 <script>
 /* App version stamp — bumped on every deploy so anyone can see at a glance which build a
    device is actually running (stale caches were making "is the fix live?" unanswerable). */
-const APP_VERSION = "2026-07-23.7";
+const APP_VERSION = "2026-07-23.8";
 document.getElementById("verTag").textContent = "Mas Motion build " + APP_VERSION;
 /* ---------------- storage (safe: falls back to memory if blocked) -------- */
 const memStore = {};
@@ -1635,6 +1635,16 @@ function loopVideo(m){
   if(v.paused){ try{ if(v.currentTime < m.trim.start || v.currentTime >= end-0.05) v.currentTime = m.trim.start; v.play(); }catch(e){} return; }
   if(v.currentTime >= end - 0.05){ try{ v.currentTime = m.trim.start; }catch(e){} }
 }
+/* Faint text backdrop that IS the clip which just played: keep it rolling FORWARD from wherever
+   it already is, so the text slide extends that clip instead of snapping back to the trim start
+   and replaying it (which read as the previous clip repeating). Holds if the source runs out. */
+function extendBgVideo(m){
+  const v = m.el;
+  if(v.playbackRate !== (m.speed||1)){ try{ v.playbackRate = m.speed||1; }catch(e){} }
+  const vEnd = (v.duration && isFinite(v.duration)) ? v.duration : Infinity;
+  if(v.currentTime >= vEnd - 0.05){ if(!v.paused){ try{ v.pause(); }catch(e){} } return; }  // ran out → hold, never loop
+  if(v.paused){ try{ v.play(); }catch(e){} }
+}
 /* Prepare ONLY the first clip before the run starts. Phone browsers can only decode a
    couple of videos at once, so priming every clip up front (what this used to do) simply
    exhausted the decoder pool — the 1st clip would grab a decoder, the 2nd would stutter,
@@ -1716,11 +1726,16 @@ function renderMainFrame(t, W, H){
     if(isPreRoll){ primeFrame(mm); return; }
     if(!mm.el.paused) mm.el.pause();
   });
+  // is the auto/chosen backdrop the very clip that played immediately before this text slide?
+  const prevRealIdx = idx>0 ? order[idx-1] : -1;
+  const bgIsPrevClip = curBg && prevRealIdx>=0 && media[prevRealIdx] && media[prevRealIdx].id===curBg.id;
   boxIds.forEach(id=>{
     const vm = mediaById(id); if(!vm || vm.kind!=="vid") return;
-    // the faint full-screen backdrop plays through ONCE and holds its last frame (no loop-back,
-    // which is what read as the clip "repeating"); small corner PiP boxes still loop quietly
-    if(curBg && id===curBg.id) syncVideo(vm, local); else loopVideo(vm);
+    if(curBg && id===curBg.id){
+      // backdrop = the previous clip → keep it rolling forward (extend it), don't replay it.
+      // Any other backdrop (a later clip, or a far pinned clip) plays through once and holds.
+      if(bgIsPrevClip) extendBgVideo(vm); else syncVideo(vm, local);
+    } else loopVideo(vm);   // small corner PiP boxes keep looping quietly
   });
 
   const m = media[realIdx];
